@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pit Lap Viewer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="day">
+    <button id="prev" class="ghost" title="Earlier day (left arrow)" aria-label="Earlier day">&#9664;</button>
+    <div id="dayname" class="dayname">No days yet</div>
+    <button id="next" class="ghost" title="Later day (right arrow)" aria-label="Later day">&#9654;</button>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button data-view="board" class="tab" role="tab">1 Sessions</button>
+    <button data-view="map" class="tab" role="tab">2 Map</button>
+    <button data-view="corners" class="tab" role="tab">3 Corners</button>
+  </nav>
+  <div class="right">
+    <span id="status" class="status"></span>
+    <button id="fs" class="ghost" title="Full screen (F)">Full screen</button>
+  </div>
+</header>
+<main id="main"></main>
+<div id="tip" class="tip" hidden></div>
+<div id="drop" class="drop" hidden><div>Drop .xrk files to add them</div></div>
+<script src="app.js"></script>
+</body>
+</html>

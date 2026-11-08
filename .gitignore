@@ -1,0 +1,25 @@
+# Lap data stays out of git (it lives in Google Drive and on local disks)
+raw/
+output/
+*.xrk
+*.xrz
+*.drk
+*.png
+*.csv
+*.json
+!scripts/harris_hill_turns.csv
+!scripts/t6_natural_radius.csv
+!viewer/screenshots/*.png
+
+# Viewer's local folders and settings
+viewer/config.json
+viewer/xrk/
+viewer/data/
+viewer/summaries/
+viewer/.venv/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.zip
