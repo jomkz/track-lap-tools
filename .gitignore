@@ -7,9 +7,11 @@ output/
 *.png
 *.csv
 *.json
-!scripts/harris_hill_turns.csv
-!scripts/t6_natural_radius.csv
 !viewer/screenshots/*.png
+
+# Track definitions are reference data, not lap data: they are kept
+!tracks/*/*.json
+!tracks/*/*.csv
 
 # Viewer's local folders and settings
 viewer/config.json

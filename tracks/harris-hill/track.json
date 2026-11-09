@@ -1,0 +1,19 @@
+{
+  "name": "Harris Hill Road",
+  "place": "San Marcos, Texas",
+  "center": {"lat": 29.9180, "lon": -97.8720},
+  "radius_m": 2000,
+  "turns": "turns.csv",
+  "turns_note": "Official map numbers, 1 to 11 in the clockwise direction; counterclockwise meets them in reverse, 11 down to 1. Turn 3 is a gentle kink that does not show as a corner in the data.",
+  "logger_track_names": {"R2H": "CCW", "H2R": "CW"},
+  "chicanes": [
+    {
+      "name": "Turn 6 chicane",
+      "direction": "CW",
+      "turn": 6,
+      "after_turn": 5,
+      "before_turn": 7,
+      "natural_radius": "t6_natural_radius.csv"
+    }
+  ]
+}

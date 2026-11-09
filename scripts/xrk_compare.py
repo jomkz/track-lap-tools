@@ -2,9 +2,11 @@
 """Compare two sets of laps in the same direction (two bikes, or two days) piece by piece.
 
 Usage:
-    python3 -I xrk_compare.py OUT_DIR --a "Ninja 400" A1.xrk A2.xrk --b "R3" B1.xrk B2.xrk
+    python3 -I xrk_compare.py OUT_DIR --a "Ninja 400" A1.xrk A2.xrk --b "R3" B1.xrk B2.xrk [--turns FILE.csv]
 
-The lap is cut at every official turn and at the top speed between turns, so each turn has an
+Both sets must be from the same track. Turns come from the track's own turn table
+(tracks/<id>/turns.csv) or from --turns (for example a day's corners.csv at a track with no table).
+The lap is cut at every turn and at the top speed between turns, so each turn has an
 "into" piece (top speed to the turn: braking and entry) and a "drive out" piece (the turn to the
 next top speed: exit and straight). For each piece it gives each set's best-lap time and its ideal
 (fastest of any lap within 3% of that set's best), and the difference (negative = A quicker).
@@ -42,19 +44,21 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--a", nargs="+", required=True, metavar=("LABEL", "FILE"))
     ap.add_argument("--b", nargs="+", required=True, metavar=("LABEL", "FILE"))
+    ap.add_argument("--turns", help="turn table to cut the lap at (turn,name,lat,lon, or a day's corners.csv)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    sets = {}
-    for key, arg in (("A", a.a), ("B", a.b)):
-        laps = tc.full_laps([tc.load(f) for f in arg[1:]])
-        sets[key] = {"label": arg[0], "laps": laps}
+    loaded = {key: [tc.read(f) for f in arg[1:]] for key, arg in (("A", a.a), ("B", a.b))}
+    tc.place(loaded["A"] + loaded["B"])      # one map for both sets
+    sets = {key: {"label": arg[0], "laps": tc.full_laps(loaded[key])} for key, arg in (("A", a.a), ("B", a.b))}
     bestA = min(sets["A"]["laps"], key=lambda l: l["time"])
     dirn = bestA["dir"]
     ref = tc.Ref(bestA)
-    T = sorted(tc.turns(ref), key=lambda t: t["d"])
+    T = sorted(tc.turns(ref, a.turns), key=lambda t: t["d"])
+    if not T:
+        sys.exit(tc.NO_TURNS)
     grid = np.arange(0, ref.L, 1.0)
     vA = tc.on_grid(ref, bestA, grid, "vs")
-    # each turn's mark is A's slowest point within 80 m of the official turn position
+    # each turn's mark is A's slowest point within 80 m of the turn's position
     apex = []
     for t in T:
         m = np.abs(grid - t["d"]) < 80

@@ -2,26 +2,32 @@
 """Ideal lap and corner-by-corner time loss from AiM .xrk files (Solo DL, GPS + IMU).
 
 Usage:
-    python3 -I xrk_ideal_lap.py OUT_DIR FILE.xrk [FILE.xrk ...] [--ref SESSION:LAP]
+    python3 -I xrk_ideal_lap.py OUT_DIR FILE.xrk [FILE.xrk ...] [--ref SESSION:LAP] [--turns FILE.csv]
 
-All files should be one bike on one day (or at least one track layout). Only laps run
-in the same direction as the reference lap are compared (Harris Hill runs both ways).
+All files should be one bike on one day at one track layout. Only laps run in the same direction
+as the reference lap are compared (some tracks run both ways). The track is found from where the
+GPS points are (scripts/tracks.py); any circuit works, with or without a folder in tracks/.
 
 Method
     laps used    : logger "full" laps (AiM's own out and pit-in laps are never "full", which
                    covers the in-lap rule; --drop-last-full also drops each session's last
                    full lap), minus laps slower than 103% of the
-                   day's best, minus laps whose path strays > MAX_OFFLINE_M from the reference.
+                   day's best, minus laps whose path strays > MAX_OFFLINE_M from the reference,
+                   minus laps the GPS did not fully record: a hole of more than GPS_GAP_S in the
+                   samples, or section times that do not add up to the lap time within CLOSURE_S.
+                   Such a lap keeps its lap time in the lap table, but its times along the track
+                   are not known, so it can be neither the best lap here nor part of the ideal.
     reference    : the fastest used lap (or --ref, when its GPS is steadier). Its GPS path
                    defines distance 0..L; "best lap" in the outputs is always the fastest used lap.
                    Every other lap's GPS points are projected onto that path, so "distance"
                    means the same spot on track for every lap.
     corners      : peaks of smoothed lateral g on the reference lap (>= CORNER_G). Named with the
-                   track's official turn numbers from --turns (default harris_hill_turns.csv,
-                   from the Harris Hill Road map: numbered 1 to 11 in the clockwise direction,
-                   so counterclockwise laps meet them in reverse). Turn 3, the kink on the long
-                   left-hand side of the map, is too gentle to show as a corner in the data.
-                   Corners with no match within TURN_MATCH_M fall back to T1, T2... in riding order.
+                   track's official turn numbers when it has a turn table (tracks/<id>/turns.csv,
+                   or --turns): each corner takes the nearest listed turn within TURN_MATCH_M, so
+                   the numbers stay the same in both directions. A corner with no match, and every
+                   corner at a track with no table, is numbered T1, T2... in riding order from the
+                   timing line. A listed turn too gentle to show as a peak (Harris Hill's turn 3
+                   kink) is simply not found.
     sections     : one per corner, from the top-speed point before it to the top-speed point
                    after it (brake zone + corner + drive out). The front straight is split by
                    the timing line into a piece after the line and a piece before it.
@@ -34,8 +40,9 @@ Method
                    neutral  : in between (coasting, or holding a steady throttle mid-corner).
                    This is inferred from speed only; there is no throttle or brake sensor.
                    Hills shift it a little (uphill makes coasting read as light braking).
-Outputs (OUT_DIR): sections.csv, lap_sections.csv, corner_phases.csv, summary.md,
-                   track_map.png, speed_trace.png, delta_trace.png
+Outputs (OUT_DIR): sections.csv, lap_sections.csv, corners.csv, corner_phases.csv,
+                   corner_phases_all_laps.csv, summary.md, track_map.png, speed_trace.png,
+                   viewer.json (the same numbers for the pit lap viewer)
 """
 import argparse
 import contextlib
@@ -43,11 +50,15 @@ import csv
 import io
 import math
 import os
+import sys
 
 import numpy as np
 from scipy.signal import find_peaks, savgol_filter
 
 from libxrk import aim_xrk
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tracks  # noqa: E402
 
 SLOW_FACTOR = 1.03
 MAX_OFFLINE_M = 12.0
@@ -59,6 +70,8 @@ TURN_MATCH_M = 120.0
 SPLIT_MIN_M = 30.0
 THROTTLE_G = 0.05
 THROTTLE_HOLD_S = 0.4
+GPS_GAP_S = 1.0
+CLOSURE_S = 0.1
 G = 9.80665
 
 
@@ -80,7 +93,7 @@ def load(path):
     name = name[name.rfind("a_"):] if "a_" in name else name
     return {"name": name, "t": t, "v": v, "lat": lat, "lon": lon, "glat": glat,
             "laps": log.laps.to_pylist(), "vehicle": log.metadata.get("Vehicle"),
-            "date": log.metadata.get("Log Date")}
+            "date": log.metadata.get("Log Date"), "venue": log.metadata.get("Venue") or ""}
 
 
 def smooth(x, dt, win_s):
@@ -158,13 +171,15 @@ def main():
     ap.add_argument("--ref", help="SESSION:LAP to use as reference, e.g. a_0215:7")
     ap.add_argument("--drop-last-full", action="store_true",
                     help="also drop each session's last full lap (old in-lap rule); by default only AiM's own pit-in lap is left out")
-    ap.add_argument("--turns", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "harris_hill_turns.csv"),
-                    help="CSV of official turn numbers (turn,name,lat,lon); corners get the nearest one")
+    ap.add_argument("--turns", help="CSV of official turn numbers (turn,name,lat,lon) to use instead of the "
+                                    "track's own table; corners get the nearest one")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     sessions = [load(p) for p in sorted(a.files)]
     lat0 = np.nanmedian(np.concatenate([s["lat"] for s in sessions]))
     lon0 = np.nanmedian(np.concatenate([s["lon"] for s in sessions]))
+    venues = [s["venue"] for s in sessions if s["venue"]]
+    track = tracks.find(float(lat0), float(lon0), max(set(venues), key=venues.count) if venues else "")
     for s in sessions:
         s["x"], s["y"] = to_xy(s["lat"], s["lon"], lat0, lon0)
         dt = float(np.median(np.diff(s["t"])))
@@ -181,8 +196,10 @@ def main():
         full = [l for l in s["laps"] if l["lap_type"] == "full"]
         for i, l in enumerate(full):
             idx = lap_slice(s, l)
+            gap = float(np.max(np.diff(np.concatenate([[l["start_time"] / 1000], s["t"][idx], [l["end_time"] / 1000]]))))
             laps.append({"s": s, "lap": l, "num": l["num"], "time": (l["end_time"] - l["start_time"]) / 1000,
-                         "dir": shoelace_dir(s["x"][idx], s["y"][idx]), "last": False})
+                         "dir": shoelace_dir(s["x"][idx], s["y"][idx]) if len(idx) >= 10 else "",
+                         "last": False, "gps_gap": gap})
     if a.drop_last_full:
         for s_ in sessions:
             mine = [L for L in laps if L["s"] is s_]
@@ -192,12 +209,14 @@ def main():
         sn, ln = a.ref.split(":")
         ref = next(L for L in laps if L["s"]["name"] == sn and L["num"] == int(ln))
     else:
-        ref = min((L for L in laps if not L["last"]), key=lambda L: L["time"])
+        ref = min((L for L in laps if not L["last"] and L["gps_gap"] <= GPS_GAP_S), key=lambda L: L["time"])
     best = min(L["time"] for L in laps if not L["last"] and L["dir"] == ref["dir"]
-               and L["s"]["vehicle"] == ref["s"]["vehicle"])
+               and L["s"]["vehicle"] == ref["s"]["vehicle"] and L["gps_gap"] <= GPS_GAP_S)
     for L in laps:
         L["why_out"] = ""
-        if L["dir"] != ref["dir"]:
+        if L["gps_gap"] > GPS_GAP_S:
+            L["why_out"] = f"GPS dropout of {L['gps_gap']:.0f} s in the log"
+        elif L["dir"] != ref["dir"]:
             L["why_out"] = "other direction"
         elif L["s"]["vehicle"] != ref["s"]["vehicle"]:
             L["why_out"] = "other bike"
@@ -243,16 +262,15 @@ def main():
     # cyclic sections; the one that holds the timing line wraps through it
     order = sorted(range(len(apex_d)), key=lambda i: apex_d[i])
     tname = {ci: f"T{n + 1}" for n, ci in enumerate(order)}
-    # official turn numbers: nearest known turn apex within TURN_MATCH_M (Harris Hill table by default)
-    if a.turns and os.path.exists(a.turns):
-        known = list(csv.DictReader(open(a.turns)))
-        kx, ky = to_xy(np.array([float(k["lat"]) for k in known]), np.array([float(k["lon"]) for k in known]),
-                       lat0, lon0)
+    # official turn numbers: nearest listed turn within TURN_MATCH_M, when the track has a turn table
+    known = tracks.read_turns(a.turns or track["turns_csv"])
+    if known:
+        kx, ky = to_xy(np.array([k["lat"] for k in known]), np.array([k["lon"] for k in known]), lat0, lon0)
         for ci in order:
             dist = np.hypot(kx - rx[pk[ci]], ky - ry[pk[ci]])
             j = int(np.argmin(dist))
             if dist[j] < TURN_MATCH_M:
-                tname[ci] = f"T{known[j]['turn']}" + (f" {known[j]['name']}" if known[j]["name"] else "")
+                tname[ci] = known[j]["label"]
     sections = []
     for k in range(len(bd)):
         d0, d1 = bd[k - 1], bd[k]
@@ -320,6 +338,9 @@ def main():
         tc = {e: float(np.interp(e, mono, t)) for e in edges}
         L["sec_t"] = np.array([(tc[sec["d1"]] - tc[sec["d0"]]) if not sec["wrap"] else
                                (tc[sec["d1"]] - tc[0.0]) + (tc[L_ref] - tc[sec["d0"]]) for sec in sections])
+        L["closure"] = float(L["sec_t"].sum() - L["time"])
+        if not L["why_out"] and abs(L["closure"]) > CLOSURE_S:
+            L["why_out"] = f"section times do not add up to the lap time (off by {L['closure']:+.1f} s)"
         rows.append(L)
     used = [L for L in rows if not L["why_out"]]
     ideal_t = np.min(np.array([L["sec_t"] for L in used]), axis=0)
@@ -463,7 +484,7 @@ def main():
             out_reasons.setdefault(L["why_out"], []).append(f"{L['s']['name']} L{L['num']}")
     rank = sorted(range(len(sections)), key=lambda k: -lost[k])
     crank = sorted(corners, key=lambda c: -c["lost_whole"])
-    lines = [f"# Ideal lap, {ref['s']['date']} ({ref['s']['vehicle']}, {ref['dir']})", "",
+    lines = [f"# Ideal lap, {ref['s']['date']} ({track['name']}, {ref['s']['vehicle']}, {ref['dir']})", "",
              f"- Best lap: {fast['s']['name']} lap {fast['num']}, {fmt(fast['time'])}",
              *([f"- Track geometry from: {ref['s']['name']} lap {ref['num']} (steadier GPS)"] if ref is not fast else []),
              f"- Ideal lap (best section times, {len(used)} laps): {fmt(ideal)}",
@@ -590,6 +611,8 @@ def main():
     r3 = lambda arr: [round(float(x), 1) for x in arr]
     json.dump({
         "date": ref["s"]["date"], "vehicle": ref["s"]["vehicle"], "direction": ref["dir"],
+        "track": {"id": track["id"], "name": track["name"], "known": track["known"],
+                  "turn_numbers": "table" if known else "riding order", "turns_note": track["turns_note"]},
         "best_lap": {"session": fast["s"]["name"], "lap": fast["num"], "time_s": round(fast["time"], 3)},
         "geometry_from": {"session": ref["s"]["name"], "lap": ref["num"]},
         "ideal_s": round(ideal, 3), "ideal_whole_corners_s": round(sum(c["best_whole"] for c in corners), 3),

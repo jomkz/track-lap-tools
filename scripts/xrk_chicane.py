@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
-"""Estimate what the clockwise turn 6 cone chicane costs per lap at Harris Hill.
+"""Estimate what a temporary cone chicane costs per lap.
 
 Usage:
-    python3 -I xrk_chicane.py OUT_DIR FILE.xrk [FILE.xrk ...]        (clockwise laps, one bike)
-    python3 -I xrk_chicane.py --make-radius CCW_FILE.xrk [...]        (rebuild t6_natural_radius.csv)
+    python3 -I xrk_chicane.py OUT_DIR FILE.xrk [FILE.xrk ...]     (laps in the chicane's direction, one bike)
+    python3 -I xrk_chicane.py --make-radius FILE.xrk [...]        (laps run the other way: rebuild the
+                                                                   natural-radius file)
 
-Clockwise, cones in turn 6 make him brake between turn 5 and Mustang (turn 7).
-Counterclockwise it is flat out, so the counterclockwise laps give the natural line's radius.
+Only for tracks that define a chicane in tracks/<id>/track.json, for example Harris Hill's turn 6:
+clockwise, cones in turn 6 make the rider brake between turn 5 and Mustang (turn 7), while
+counterclockwise it is flat out, so the counterclockwise laps give the natural line's radius.
 
-Model, per clockwise lap, from his top speed after turn 5 to his slowest point in turn 7:
+    "chicanes": [{"name": "Turn 6 chicane", "direction": "CW", "turn": 6, "after_turn": 5,
+                  "before_turn": 7, "natural_radius": "t6_natural_radius.csv"}]
+
+    direction        the way round the cones are used
+    turn             the turn the cones are in
+    after_turn       the turn before it: the stretch starts at the top speed after this turn
+    before_turn      the turn after it: the stretch ends at the slowest point in this turn
+    natural_radius   CSV (lat,lon,radius_m) of the line through the turn without cones, in the
+                     track's folder
+The stretch from after_turn to before_turn must not cross the timing line.
+
+Model, per lap, from the top speed after after_turn to the slowest point in before_turn:
     no chicane : full throttle from that top speed, using this bike's own measured acceleration at
                  each speed (70th and 90th percentile of upright drive samples that day), never faster
-                 through turn 6 than its natural radius allows at a lean of 1.0, 1.1 or 1.2 g, then
-                 braking for turn 7 at the decel he used on that lap, to the same turn 7 speed.
-    cost       : his actual time over that stretch minus the modelled time.
-Reported as a range over the six cases and over his laps; it is an estimate, not a measurement.
+                 through the turn than its natural radius allows at a lean of 1.0, 1.1 or 1.2 g, then
+                 braking for before_turn at the decel used on that lap, to the same speed there.
+    cost       : the actual time over that stretch minus the modelled time.
+Reported as a range over the six cases and over the laps; it is an estimate, not a measurement.
 
 Writes chicane_laps.csv, chicane.md and chicane.png to OUT_DIR.
 """
@@ -26,21 +39,32 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import track_common as tc  # noqa: E402
+import tracks  # noqa: E402
 
-RADIUS_CSV = os.path.join(tc.HERE, "t6_natural_radius.csv")
 GMAX = (1.0, 1.1, 1.2)
 ACCEL_P = (70, 90)
 SLOW_FACTOR = 1.03
+DIR_NAME = {"CW": "clockwise", "CCW": "counterclockwise"}
+
+
+def radius_csv(track, spec):
+    return os.path.join(track["dir"], spec["natural_radius"])
 
 
 def make_radius(files):
-    sess = [tc.load(f) for f in files]
-    laps = [l for l in tc.full_laps(sess) if l["dir"] == "CCW"]
+    sess, track = tc.load_day(files)
+    if not track["chicanes"]:
+        sys.exit(f"{track['name']}: no chicane is defined for this track (tracks/<id>/track.json)")
+    spec = track["chicanes"][0]
+    free = "CCW" if spec["direction"] == "CW" else "CW"
+    laps = [l for l in tc.full_laps(sess) if l["dir"] == free]
+    if not laps:
+        sys.exit(f"no {DIR_NAME[free]} laps: the natural line comes from laps run without the cones")
     best = min(laps, key=lambda l: l["time"])
     laps = [l for l in laps if l["time"] <= best["time"] * 1.02]
     ref = tc.Ref(best)
     T = {t["turn"]: t["d"] for t in tc.turns(ref)}
-    lo, hi = sorted((T[5], T[7]))
+    lo, hi = sorted((T[spec["after_turn"]], T[spec["before_turn"]]))
     grid = np.arange(lo, hi, 2.0)
     R = []
     for l in laps:
@@ -49,14 +73,14 @@ def make_radius(files):
         R.append(v ** 2 / np.maximum(g, 0.3 * tc.G))
     r = np.median(np.array(R), axis=0)
     idx = np.searchsorted(ref.d, grid).clip(0, len(ref.d) - 1)
-    lat0, lon0 = tc.LAT0, tc.LON0
-    with open(RADIUS_CSV, "w", newline="") as f:
+    path = radius_csv(track, spec)
+    with open(path, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["lat", "lon", "radius_m"])
         s, i = best["s"], best["i"]
         for k, j in enumerate(idx):
             w.writerow([f"{s['lat'][i][j]:.6f}", f"{s['lon'][i][j]:.6f}", f"{r[k]:.0f}"])
-    print(f"wrote {RADIUS_CSV} from {len(laps)} CCW laps; tightest {r.min():.0f} m")
+    print(f"wrote {path} from {len(laps)} {free} laps; tightest {r.min():.0f} m")
 
 
 def accel_curve(ref, laps, p):
@@ -71,19 +95,20 @@ def accel_curve(ref, laps, p):
     return bins[ok] + 2.5, c[ok]
 
 
-def model(ref, lap, T, rad, acc, gmax):
-    grid = np.arange(T[5], T[7] + 60, 1.0)
+def model(ref, lap, T, spec, rad, acc, gmax):
+    ta, tn, tb = T[spec["after_turn"]], T[spec["turn"]], T[spec["before_turn"]]
+    grid = np.arange(ta, tb + 60, 1.0)
     va = tc.on_grid(ref, lap, grid, "vs")
     ax = tc.on_grid(ref, lap, grid, "ax")
-    w0 = (grid > T[5] + 50) & (grid < T[6])
+    w0 = (grid > ta + 50) & (grid < tn)
     i0 = np.where(w0)[0][np.argmax(va[w0])]
-    w1 = (grid > T[7] - 80) & (grid < T[7] + 60)
+    w1 = (grid > tb - 80) & (grid < tb + 60)
     i1 = np.where(w1)[0][np.argmin(va[w1])]
-    bz = np.where((ax < -0.30) & (np.arange(len(grid)) < i1) & (grid > T[6]))[0]
+    bz = np.where((ax < -0.30) & (np.arange(len(grid)) < i1) & (grid > tn))[0]
     ib = bz[0]
     while ib + 1 < i1 and ax[ib + 1] < -0.30:
         ib += 1
-    # first sample of the last continuous hard-brake run before turn 7
+    # first sample of the last continuous hard-brake run before the exit turn
     j = i1
     while j > i0 and ax[j - 1] >= -0.30:
         j -= 1
@@ -107,32 +132,37 @@ def model(ref, lap, T, rad, acc, gmax):
     vm = np.minimum(vf, vb)
     s = slice(i0, i1 + 1)
     tt = lambda v: float(np.sum(np.diff(grid[s]) / ((v[s][1:] + v[s][:-1]) / 2)))
-    t6 = (grid > T[6] - 60) & (grid < T[6] + 40)
+    near = (grid > tn - 60) & (grid < tn + 40)
     return {"cost": tt(va) - tt(vm), "grid": grid, "va": va, "vm": vm, "i0": i0, "i1": i1,
-            "t6_actual": float(va[t6].min() * 3.6), "t6_model": float(np.nanmin(vm[t6]) * 3.6),
+            "min_actual": float(va[near].min() * 3.6), "min_model": float(np.nanmin(vm[near]) * 3.6),
             "top_model": float(np.nanmax(vm[s]) * 3.6), "decel_g": dec / tc.G}
 
 
 def main():
+    if len(sys.argv) < 3:
+        sys.exit(__doc__)
     if sys.argv[1] == "--make-radius":
         return make_radius(sys.argv[2:])
     out, files = sys.argv[1], sys.argv[2:]
     os.makedirs(out, exist_ok=True)
-    sess = [tc.load(f) for f in files]
-    laps = [l for l in tc.full_laps(sess) if l["dir"] == "CW"]
-    if not laps:
-        print("no clockwise laps: the chicane is only used clockwise")
+    sess, track = tc.load_day(files)
+    every = tc.full_laps(sess)
+    spec = next((c for c in track["chicanes"] if any(l["dir"] == c["direction"] for l in every)), None)
+    if spec is None:
+        print(f"{track['name']}: no chicane is defined for the direction of these laps")
         return
+    laps = [l for l in every if l["dir"] == spec["direction"]]
     best = min(laps, key=lambda l: l["time"])
     used = sorted([l for l in laps if l["time"] <= best["time"] * SLOW_FACTOR], key=lambda l: l["time"])
-    # geometry from the used lap with the smallest GPS shift to the others (steadier corners)
     ref = tc.Ref(best)
-    T = {t["turn"]: t["d"] for t in tc.turns(ref)}
-    rows = list(csv.DictReader(open(RADIUS_CSV)))
+    turns = {t["turn"]: t for t in tc.turns(ref)}
+    T = {n: t["d"] for n, t in turns.items()}
+    ta, tn, tb = (turns[spec[k]] for k in ("after_turn", "turn", "before_turn"))
+    rows = list(csv.DictReader(open(radius_csv(track, spec))))
     rd = ref.dist_of(np.array([float(r["lat"]) for r in rows]), np.array([float(r["lon"]) for r in rows]))
     rr = np.array([float(r["radius_m"]) for r in rows])
     o = np.argsort(rd)
-    grid = np.arange(T[5], T[7] + 60, 1.0)
+    grid = np.arange(ta["d"], tb["d"] + 60, 1.0)
     rad = np.interp(grid, rd[o], rr[o], left=1e4, right=1e4)
     accs = {p: accel_curve(ref, laps, p) for p in ACCEL_P}
     res = []
@@ -140,11 +170,11 @@ def main():
         r = {"session": l["s"]["name"], "lap": l["num"], "lap_s": round(l["time"], 3)}
         for g in GMAX:
             for p in ACCEL_P:
-                m = model(ref, l, T, rad, accs[p], g)
+                m = model(ref, l, T, spec, rad, accs[p], g)
                 r[f"cost_s_lean{g}_acc{p}"] = round(m["cost"], 3)
-        m = model(ref, l, T, rad, accs[90], 1.1)
-        r.update({"t6_min_kph": round(m["t6_actual"], 1), "t6_model_kph": round(m["t6_model"], 1),
-                  "top_before_t7_model_kph": round(m["top_model"], 1), "t7_decel_g": round(m["decel_g"], 2)})
+        m = model(ref, l, T, spec, rad, accs[90], 1.1)
+        r.update({"chicane_min_kph": round(m["min_actual"], 1), "chicane_model_kph": round(m["min_model"], 1),
+                  "top_before_exit_model_kph": round(m["top_model"], 1), "exit_decel_g": round(m["decel_g"], 2)})
         res.append(r)
     with open(os.path.join(out, "chicane_laps.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(res[0].keys()))
@@ -157,13 +187,15 @@ def main():
     central = float(np.median(C[:, keys.index("cost_s_lean1.1_acc90")]))
     b = res[0]
     vehicle = best["s"]["vehicle"]
-    lines = [f"# Turn 6 chicane cost, {best['s']['date']} ({vehicle}, CW)", "",
+    free = DIR_NAME["CCW" if spec["direction"] == "CW" else "CW"]
+    lines = [f"# {spec['name']} cost, {best['s']['date']} ({vehicle}, {spec['direction']})", "",
              f"- Estimated cost per lap: about {central:.1f} s (range {lo:.2f} to {hi:.2f} s over the model cases, median of {len(res)} laps).",
-             f"- Best lap {b['session']} lap {b['lap']}: slowest in turn 6 {b['t6_min_kph']:.0f} km/h; modelled without cones "
-             f"{b['t6_model_kph']:.0f} km/h, peaking near {b['top_before_t7_model_kph']:.0f} km/h before braking for Mustang.",
-             "- Method: see the header of scripts/xrk_chicane.py. Turn 6's natural radius comes from counterclockwise laps",
-             "  (scripts/t6_natural_radius.csv); acceleration is this bike's own from the same day. Estimate, not a measurement.",
-             "", "| Lean limit through 6 | Accel 70th pct | Accel 90th pct |", "|---|---|---|"]
+             f"- Best lap {b['session']} lap {b['lap']}: slowest in turn {tn['turn']} {b['chicane_min_kph']:.0f} km/h; modelled without cones "
+             f"{b['chicane_model_kph']:.0f} km/h, peaking near {b['top_before_exit_model_kph']:.0f} km/h before braking for "
+             f"{tb['name'] or 'turn ' + str(tb['turn'])}.",
+             f"- Method: see the header of scripts/xrk_chicane.py. Turn {tn['turn']}'s natural radius comes from {free} laps",
+             f"  (tracks/{track['id']}/{spec['natural_radius']}); acceleration is this bike's own from the same day. Estimate, not a measurement.",
+             "", f"| Lean limit through {tn['turn']} | Accel 70th pct | Accel 90th pct |", "|---|---|---|"]
     for g in GMAX:
         lines.append(f"| {g} g | {np.median(C[:, keys.index(f'cost_s_lean{g}_acc70')]):.2f} s | "
                      f"{np.median(C[:, keys.index(f'cost_s_lean{g}_acc90')]):.2f} s |")
@@ -172,18 +204,18 @@ def main():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    m = model(ref, used[0], T, rad, accs[90], 1.1)
+    m = model(ref, used[0], T, spec, rad, accs[90], 1.1)
     s = slice(m["i0"] - 40 if m["i0"] > 40 else 0, m["i1"] + 40)
     fig, ax = plt.subplots(figsize=(9, 4.2), facecolor="#fcfcfb")
     ax.set_facecolor("#fcfcfb")
     ax.plot(m["grid"][s] - m["grid"][0], m["va"][s] * 3.6, color="#2a78d6", lw=2, label="Actual, with cones")
     ax.plot(m["grid"][s] - m["grid"][0], m["vm"][s] * 3.6, color="#eb6834", lw=2, ls="--", label="Modelled, no cones")
-    for t, nm in ((6, "T6"), (7, "T7 Mustang")):
-        ax.axvline(T[t] - m["grid"][0], color="#888", lw=0.8)
-        ax.text(T[t] - m["grid"][0] + 4, ax.get_ylim()[0] + 4, nm, color="#555", fontsize=9)
-    ax.set_xlabel("Metres after turn 5")
+    for t in (tn, tb):
+        ax.axvline(t["d"] - m["grid"][0], color="#888", lw=0.8)
+        ax.text(t["d"] - m["grid"][0] + 4, ax.get_ylim()[0] + 4, t["label"], color="#555", fontsize=9)
+    ax.set_xlabel(f"Metres after turn {ta['turn']}")
     ax.set_ylabel("Speed (km/h)")
-    ax.set_title(f"Turn 6 chicane, best lap ({used[0]['s']['name']} lap {used[0]['num']}): about {m['cost']:.1f} s", loc="left", fontsize=11)
+    ax.set_title(f"{spec['name']}, best lap ({used[0]['s']['name']} lap {used[0]['num']}): about {m['cost']:.1f} s", loc="left", fontsize=11)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
     ax.legend(frameon=False, loc="upper right")

@@ -22,10 +22,13 @@ Definitions
     direction       : CW or CCW, read from the GPS track. Each full lap's path is a closed
                       loop; the sign of its enclosed area (shoelace formula on longitude and
                       latitude) gives the way round. Session direction = most laps' direction.
-                      Harris Hill runs both ways, so compare lap times only within one direction.
-    venue_direction : the direction the logger's track name implies, as a cross-check only.
-                      At Harris Hill the AiM track reads "R2H" counterclockwise and "H2R"
-                      clockwise. Other venues are left blank.
+                      Some tracks run both ways, so compare lap times only within one direction.
+    track           : the known track (tracks/<id>/) the GPS points are at, blank when there is
+                      no folder for it. venue is the track name set in the logger.
+    venue_direction : the direction the logger's track name implies, as a cross-check only, for
+                      tracks that list it ("logger_track_names" in track.json: at Harris Hill
+                      the AiM track reads "R2H" counterclockwise and "H2R" clockwise). Blank
+                      otherwise.
     direction_check : "match", or "MISMATCH" when GPS and track name disagree (GPS wins;
                       the logger was probably left on the other track setting).
 """
@@ -37,8 +40,10 @@ from datetime import datetime
 
 from libxrk import aim_xrk
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tracks  # noqa: E402
+
 SLOW_FACTOR = 1.07
-VENUE_DIRECTION = {"R2H": "CCW", "H2R": "CW"}
 
 
 def fmt(sec):
@@ -82,6 +87,8 @@ def read_session(path):
         g_lon = lon_t.column(1).to_pylist()
     except (KeyError, IndexError):
         g_times = g_lat = g_lon = []
+    fixes = [(a, b) for a, b in zip(g_lat, g_lon) if a and b]
+    track = tracks.match(st.median(a for a, _ in fixes), st.median(b for _, b in fixes)) if fixes else None
     full = [(l["end_time"] - l["start_time"]) / 1000 for l in laps if l["lap_type"] == "full"]
     med = st.median(full) if full else None
     rows = []
@@ -107,9 +114,9 @@ def read_session(path):
         "session": os.path.splitext(os.path.basename(path))[0],
         "date": dt.strftime("%Y-%m-%d") if dt else md.get("Log Date"),
         "start": dt.strftime("%H:%M") if dt else md.get("Log Time"),
-        "venue": md.get("Venue"), "vehicle": md.get("Vehicle"),
+        "venue": md.get("Venue"), "track": track["name"] if track else "", "vehicle": md.get("Vehicle"),
         "direction": direction,
-        "venue_direction": VENUE_DIRECTION.get((md.get("Venue") or "").strip().upper(), ""),
+        "venue_direction": (track["logger_track_names"] if track else {}).get((md.get("Venue") or "").strip().upper(), ""),
         "on_track_min": round(elapsed / 60, 1),
         "laps_total": len(rows), "laps_full": len(full), "laps_clean": len(c),
         "best": fmt(best), "best_s": best,

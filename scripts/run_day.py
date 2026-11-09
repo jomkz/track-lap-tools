@@ -6,12 +6,15 @@ Usage:
     python3 -I scripts/run_day.py 2026-11-07 --vs 2026-11-06        (also compare with that day)
     python3 -I scripts/run_day.py path/to/a_0225.xrk path/to/a_0226.xrk
 
-Files from one day can mix bikes and directions: they are grouped by bike and direction (from GPS),
-and each group gets its own folder, output/analysis_<date>[_<bike>_<dir>]/ (no suffix when the day has
-one group). --vs compares each group with the laps in the --vs files that share its direction.
+Works at any track. Files from one day can mix bikes and directions: they are grouped by track, bike
+and direction (all from GPS), and each group gets its own folder, output/analysis_<date>[_<bike>_<dir>]/
+(no suffix when the day has one group). --vs compares each group with the laps in the --vs files that
+share its track and direction.
 Steps per group: xrk_laps.py (lap table, direction, consistency, fade), xrk_ideal_lap.py (ideal lap,
-corners, map, speed trace), xrk_tire.py (tire-wear signal), xrk_chicane.py (clockwise only),
-xrk_compare.py (with --vs). Turn numbers are the official Harris Hill ones in both directions.
+corners, map, speed trace), xrk_tire.py (tire-wear signal), xrk_chicane.py (only where the track
+defines a cone chicane for that direction), xrk_compare.py (with --vs).
+A track with a folder in tracks/ gets its official turn numbers, the same in both directions; any
+other track gets T1, T2... in riding order. scripts/track_add.py makes a folder from an analysed day.
 """
 import argparse
 import csv
@@ -23,6 +26,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import track_common as tc  # noqa: E402
+import tracks  # noqa: E402
 
 ROOT = os.path.dirname(tc.HERE)
 PY = [sys.executable, "-I"]
@@ -41,18 +45,28 @@ def slug(s):
     return re.sub(r"[^a-z0-9]+", "-", (s or "bike").lower()).strip("-")
 
 
-def groups(files):
+def groups(files, sites):
+    """Files by (date, track id, bike, direction). sites collects the tracks that have no folder,
+    so a later call (the --vs files) gives the same circuit the same id."""
     g = {}
     for f in files:
         s = tc.load(f)
-        laps = tc.full_laps([s])
+        laps = tc.full_laps([s], keep_gaps=True)
         if not laps:
             print(f"skip {os.path.basename(f)}: no full laps")
             continue
         dirs = [l["dir"] for l in laps]
         d = max(set(dirs), key=dirs.count)
         date = datetime.strptime(s["date"], "%m/%d/%Y").strftime("%Y-%m-%d") if s["date"] else "undated"
-        g.setdefault((date, s["vehicle"], d), []).append(f)
+        tr = s["track"]
+        tid = tr["id"]
+        if not tr["known"]:     # no folder for this track: sessions close together are one circuit
+            site = next((x for x in sites if tracks.distance_m(x[0], x[1], tr["lat0"], tr["lon0"]) < tracks.SAME_SITE_M), None)
+            if site is None:
+                site = (tr["lat0"], tr["lon0"], tid)
+                sites.append(site)
+            tid = site[2]
+        g.setdefault((date, tid, s["vehicle"], d), []).append(f)
     return g
 
 
@@ -94,29 +108,35 @@ def main():
     ap.add_argument("--vs", nargs="+", default=[], help="other .xrk files to compare against (same direction)")
     ap.add_argument("--out", default=os.path.join(ROOT, "output"))
     a = ap.parse_args()
-    G = groups(expand(a.files))
-    VS = groups(expand(a.vs)) if a.vs else {}
+    sites = []
+    G = groups(expand(a.files), sites)
+    VS = groups(expand(a.vs), sites) if a.vs else {}
     index = []
-    for (date, bike, d), files in sorted(G.items()):
-        one = sum(1 for k in G if k[0] == date) == 1
-        out = os.path.join(a.out, f"analysis_{date}" + ("" if one else f"_{slug(bike)}_{d.lower()}"))
+    for (date, tid, bike, d), files in sorted(G.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
+        same_date = [k for k in G if k[0] == date]
+        suffix = "" if len(same_date) == 1 else f"_{slug(bike)}_{d.lower()}"
+        if len({k[1] for k in same_date}) > 1:      # two tracks on one date: keep their folders apart
+            suffix = f"_{tid}{suffix}"
+        out = os.path.join(a.out, f"analysis_{date}{suffix}")
         os.makedirs(out, exist_ok=True)
-        print(f"== {date} {bike} {d}: {len(files)} files -> {out}")
+        sess, track = tc.load_day(files)
+        print(f"== {date} {track['name']} {bike} {d}: {len(files)} files -> {out}")
         run(*PY, os.path.join(tc.HERE, "xrk_laps.py"), os.path.join(out, "laps"), *files)
-        sess = [tc.load(f) for f in files]
         laps = [l for l in tc.full_laps(sess) if l["dir"] == d]
         best = min(l["time"] for l in laps)
         laps = [l for l in laps if l["time"] <= best * 1.03]
         ref = ideal_with_good_corners(out, files, laps)
         run(*PY, os.path.join(tc.HERE, "xrk_tire.py"), out, *files)
-        if d == "CW":
+        if tracks.chicane(track, d):
             run(*PY, os.path.join(tc.HERE, "xrk_chicane.py"), out, *files)
-        for (vdate, vbike, vd), vfiles in sorted(VS.items()):
-            if vd == d:
+        # a track with no turn table is cut at the corners the ideal-lap step just found
+        turns_arg = [] if track["turns_csv"] else ["--turns", os.path.join(out, "corners.csv")]
+        for (vdate, vtid, vbike, vd), vfiles in sorted(VS.items(), key=lambda kv: tuple(str(x) for x in kv[0])):
+            if vd == d and vtid == tid:
                 cmp_out = os.path.join(out, f"vs_{slug(vbike)}_{vdate}")
-                run(*PY, os.path.join(tc.HERE, "xrk_compare.py"), cmp_out, "--a", bike or "A", *files,
+                run(*PY, os.path.join(tc.HERE, "xrk_compare.py"), cmp_out, *turns_arg, "--a", bike or "A", *files,
                     "--b", vbike or "B", *vfiles)
-        index.append((date, bike, d, out, ref))
+        index.append((date, f"{track['name']} {bike}", d, out, ref))
     print()
     for date, bike, d, out, ref in index:
         print(f"{date} {bike} {d}: {os.path.relpath(out, ROOT)} (geometry from {ref})")

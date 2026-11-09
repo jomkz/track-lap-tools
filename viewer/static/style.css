@@ -31,9 +31,10 @@ button { font: inherit; color: inherit; cursor: pointer; }
   background: var(--surface-1); border-bottom: 1px solid var(--line); flex-wrap: nowrap; min-width: 0;
 }
 .day { display: flex; align-items: center; gap: .4rem; min-width: 0; flex: 1 1 auto; }
-.dayname { font-size: 1.15rem; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dayname .dir { display: inline-block; margin-left: .4rem; padding: 0 .4rem; border-radius: .3rem;
-  background: var(--surface-2); color: var(--text-secondary); font-size: .85rem; vertical-align: .1rem; }
+.dayname { font-size: 1.15rem; font-weight: 650; white-space: nowrap; display: flex; align-items: center; min-width: 0; }
+.dayname .what { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.dayname .dir { flex: none; margin-left: .4rem; padding: 0 .4rem; border-radius: .3rem;
+  background: var(--surface-2); color: var(--text-secondary); font-size: .85rem; }
 .ghost { background: transparent; border: 1px solid var(--line); border-radius: .4rem; padding: .2rem .6rem; }
 .ghost:hover, .tab:hover { border-color: var(--text-muted); }
 .tabs { display: flex; gap: .3rem; flex: none; }

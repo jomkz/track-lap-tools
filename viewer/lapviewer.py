@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pit lap viewer: a small local web app for AiM Solo DL laps at Harris Hill.
+"""Pit lap viewer: a small local web app for AiM Solo DL laps, at any track.
 
 Start it with start_windows.bat (Windows) or ./start_linux.sh (Fedora). It opens
 http://127.0.0.1:8765 in the browser. No internet needed once it is installed.
@@ -10,7 +10,8 @@ What it does
     2. Groups files by the date the logger recorded and, for every new or changed date, runs the
        existing tools (../scripts/run_day.py) into its own data folder. The analysis is the same
        code as the cloud runs: lap table and direction, ideal lap, time lost by section, tire-wear
-       signal, turn 6 chicane cost (clockwise days).
+       signal, and the cost of a cone chicane where the track defines one. A day is analysed again
+       when its files, the scripts or a track definition (../tracks/) change.
     3. Serves three views of each day: session board, track map of time lost, corner compare.
     4. Writes a small summary of each day and session (JSON and CSV, tens of KB) into
        "summary_folder", which can be a folder synced to Google Drive.
@@ -40,8 +41,9 @@ import webbrowser
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-TOOLS = os.path.dirname(HERE)                      # track-lap-data/
+TOOLS = os.path.dirname(HERE)                      # the repository folder
 SCRIPTS = os.path.join(TOOLS, "scripts")
+TRACKS = os.path.join(TOOLS, "tracks")
 STATIC = os.path.join(HERE, "static")
 CONFIG_PATH = os.path.join(HERE, "config.json")
 
@@ -124,7 +126,26 @@ def parse_chicane_md(path):
     m = re.search(r"about ([\d.]+) s \(range ([\d.]+) to ([\d.]+) s", txt)
     if not m:
         return None
-    return {"per_lap_s": float(m.group(1)), "low_s": float(m.group(2)), "high_s": float(m.group(3))}
+    name = re.match(r"# (.+?) cost,", txt)
+    return {"name": name.group(1) if name else "Chicane", "per_lap_s": float(m.group(1)),
+            "low_s": float(m.group(2)), "high_s": float(m.group(3))}
+
+
+NO_TRACK = {"id": "", "name": "", "known": False, "turn_numbers": "", "turns_note": ""}
+
+
+def tools_sig():
+    """Changes when an analysis script or a track definition changes, so cached days are redone."""
+    h = hashlib.sha1()
+    for root in (SCRIPTS, TRACKS):
+        for dp, dn, fs in os.walk(root):
+            dn[:] = sorted(d for d in dn if d != "__pycache__")
+            for f in sorted(fs):
+                if f.endswith((".py", ".json", ".csv")):
+                    h.update(f.encode())
+                    with open(os.path.join(dp, f), "rb") as fh:
+                        h.update(fh.read())
+    return h.hexdigest()[:12]
 
 
 def day_bundle(folder, cfg, date_sessions=None):
@@ -183,7 +204,7 @@ def day_bundle(folder, cfg, date_sessions=None):
         iso = date or ""
     return {
         "id": os.path.basename(folder), "date": iso, "vehicle": v["vehicle"], "direction": v["direction"],
-        "best_lap": v["best_lap"], "best": fmt_lap(v["best_lap"]["time_s"]), "ideal_s": ideal, "ideal": fmt_lap(ideal),
+        "track": v.get("track") or NO_TRACK, "best_lap": v["best_lap"], "best": fmt_lap(v["best_lap"]["time_s"]), "ideal_s": ideal, "ideal": fmt_lap(ideal),
         "gap_s": round(v["best_lap"]["time_s"] - ideal, 3), "ideal_whole_corners_s": v["ideal_whole_corners_s"],
         "laps_used": v["laps_used"], "lap_length_m": v["lap_length_m"], "geometry_from": v["geometry_from"],
         "path": v["path"], "sections": v["sections"], "corners": v["corners"], "apexes": v["apexes"],
@@ -197,6 +218,13 @@ def day_bundle(folder, cfg, date_sessions=None):
 
 # ---------------------------------------------------------------- folder watching and processing
 
+def drop_compressed_copies(paths):
+    """Race Studio keeps a compressed .xrz next to a session's .xrk. They are the same session, so
+    where both are in one folder only the .xrk is used; a .xrz on its own is still read."""
+    have = {os.path.splitext(p)[0].lower() for p in paths if p.lower().endswith(".xrk")}
+    return [p for p in paths if not (p.lower().endswith(".xrz") and os.path.splitext(p)[0].lower() in have)]
+
+
 class Processor:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -209,6 +237,7 @@ class Processor:
             self.manifest = {}
         self.manifest.setdefault("files", {})   # path -> {sig, date, start, vehicle}
         self.manifest.setdefault("dates", {})   # date -> {sig, error}
+        self.tools = tools_sig()
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.status = {"state": "idle", "message": "", "version": 0, "errors": {}, "last_scan": None}
@@ -247,11 +276,13 @@ class Processor:
 
     def scan(self):
         root = self.cfg["xrk_folder"]
+        self.tools = tools_sig()
         found = []
         for dp, _, fs in os.walk(root):
             for f in fs:
                 if f.lower().endswith(XRK_EXT):
                     found.append(os.path.join(dp, f))
+        found = drop_compressed_copies(found)
         for p in list(self.manifest["files"]):
             if p not in found:
                 del self.manifest["files"][p]
@@ -276,7 +307,7 @@ class Processor:
         return f"{st.st_size}:{int(st.st_mtime)}"
 
     def date_sig(self, files):
-        h = hashlib.sha1()
+        h = hashlib.sha1(self.tools.encode())
         for p in sorted(files):
             h.update(f"{os.path.basename(p)}|{self.manifest['files'][p]['sig']}\n".encode())
         return h.hexdigest()
@@ -373,7 +404,7 @@ class Processor:
             except (TypeError, ValueError):
                 iso = v["date"] or ""
             out.append({"id": d, "date": iso, "vehicle": v["vehicle"], "direction": v["direction"],
-                        "best": fmt_lap(v["best_lap"]["time_s"]), "ideal": fmt_lap(v["ideal_s"])})
+                        "track": (v.get("track") or NO_TRACK)["name"], "best": fmt_lap(v["best_lap"]["time_s"]), "ideal": fmt_lap(v["ideal_s"])})
         out.sort(key=lambda r: (r["date"], r["id"]), reverse=True)
         return out
 
@@ -503,7 +534,7 @@ def main():
     if a.once:
         proc.run_once()
         for d in proc.day_list():
-            print(f"  {d['date']} {d['vehicle']} {d['direction']}: best {d['best']}, ideal {d['ideal']}")
+            print(f"  {d['date']} {d['track']} {d['vehicle']} {d['direction']}: best {d['best']}, ideal {d['ideal']}")
         for k, e in proc.status["errors"].items():
             print(f"  problem with {k}: {e}")
         return

@@ -111,7 +111,8 @@ function render() {
       <p class="note">New files are picked up on their own. A day takes about half a minute to analyse.</p></div>`;
     return;
   }
-  $("#dayname").innerHTML = `${esc(niceDate(d.date))} &middot; ${esc(d.vehicle || "")}<span class="dir">${esc(dirName(d.direction))}</span>`;
+  const where = d.track && d.track.name ? `${esc(d.track.name)} &middot; ` : "";
+  $("#dayname").innerHTML = `<span class="what">${esc(niceDate(d.date))} &middot; ${where}${esc(d.vehicle || "")}</span><span class="dir">${esc(dirName(d.direction))}</span>`;
   main.innerHTML = "";
   if (S.view === "map") renderMap(main, d);
   else if (S.view === "corners") renderCorners(main, d);
@@ -126,7 +127,7 @@ function renderBoard(main, d) {
     ["Ideal lap", d.ideal, `best of every section, ${d.laps_used} laps`],
     ["Gap to ideal", `${f2(d.gap_s)} s`, `whole corners only: ${fmtLap(d.ideal_whole_corners_s)}`],
   ];
-  if (d.chicane) tiles.push(["Turn 6 chicane", `~${f1(d.chicane.per_lap_s)} s`, `per lap, range ${f2(d.chicane.low_s)} to ${f2(d.chicane.high_s)} s`]);
+  if (d.chicane) tiles.push([d.chicane.name || "Chicane", `~${f1(d.chicane.per_lap_s)} s`, `per lap, range ${f2(d.chicane.low_s)} to ${f2(d.chicane.high_s)} s`]);
   tiles.push(["Tire signal", flags.length ? flags.map((f) => short(f.turn)).join(", ") : "None",
     flags.length ? "mid-corner speed fell every session" : "no turn slowed every session"]);
   const t = document.createElement("div");
@@ -171,6 +172,16 @@ function renderBoard(main, d) {
 }
 
 // ---------------------------------------------------------------- 2. track map
+// how this day's turns got their numbers: the track's own table, or riding order when it has none
+function turnNote(d) {
+  const t = d.track || {};
+  if (t.turn_numbers === "table") return t.turns_note || "Turn numbers are from this track's turn table.";
+  if (t.turn_numbers === "riding order") {
+    return "Turn numbers are in riding order from the start/finish line: this track has no turn table yet, so they may not match the official map, and they differ between directions.";
+  }
+  return "";
+}
+
 function lossColor(v, max) {
   const steps = ["var(--seq-0)", "var(--seq-1)", "var(--seq-2)", "var(--seq-3)", "var(--seq-4)"];
   const k = Math.min(steps.length - 1, Math.floor((Math.max(0, v) / max) * steps.length));
@@ -277,7 +288,8 @@ function renderMap(main, d) {
     <ul class="rank">${ranked.map((c) => `<li><span>${esc(c.name.replace(/\+/g, " + "))}</span>
       <span><span class="rbar" style="display:block;width:${(100 * c.lost_s) / mx}%"></span></span>
       <span class="rv">${c.lost_s.toFixed(2)} s</span></li>`).join("")}</ul>
-    <p class="note">Lost = best lap's time through the corner minus your best time in each part of it (brake-in and drive-out) on any lap today. Sum of all corners = ${f2(d.gap_s)} s.</p>`;
+    <p class="note">Lost = best lap's time through the corner minus your best time in each part of it (brake-in and drive-out) on any lap today. Sum of all corners = ${f2(d.gap_s)} s.</p>
+    <p class="note">${esc(turnNote(d))}</p>`;
 }
 
 // ---------------------------------------------------------------- 3. corner compare
@@ -292,7 +304,7 @@ function lineChart(host, opts) {
   const parent = document.createElement("div");
   parent.className = "chart";
   host.appendChild(parent);
-  requestAnimationFrame(() => drawChart(parent, opts));
+  requestAnimationFrame(() => { if (parent.isConnected) drawChart(parent, opts); });   // the view may have changed already
 }
 
 function drawChart(parent, { x0, x1, series, marks = [], shade = null, apexes = [], hover = true, small = false }) {

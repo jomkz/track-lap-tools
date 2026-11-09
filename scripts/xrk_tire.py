@@ -2,17 +2,20 @@
 """Tire-wear signal: corners where mid-corner speed and grip fall session after session.
 
 Usage:
-    python3 -I xrk_tire.py OUT_DIR FILE.xrk [FILE.xrk ...]     (one bike, one direction, one day)
+    python3 -I xrk_tire.py OUT_DIR FILE.xrk [FILE.xrk ...] [--turns FILE.csv]
+                                                    (one bike, one direction, one day, one track)
 
-For every official turn (scripts/harris_hill_turns.csv) and every lap within 3% of the day's best,
-it takes the slowest speed and the peak lateral g within 70 m of the turn, then the median per
-session. A turn is flagged when the slowest speed falls by 2 km/h or more from the first session to
+For every turn and every lap within 3% of the day's best, it takes the slowest speed and the peak
+lateral g within 70 m of the turn, then the median per session. Turns come from the track's own
+turn table (tracks/<id>/turns.csv) when it has one, else from the corners the ideal-lap step found
+(OUT_DIR/corners.csv), so run that step first at a track with no table. A turn is flagged when the slowest speed falls by 2 km/h or more from the first session to
 the last, never rising by more than 0.5 km/h between sessions, and its peak lateral g falls too.
-Nov 6 check: this flagged 8 Dam Turn and 5 on the R3 with a worn rear, the two corners where the rider
-felt the rear stepping out. Inferred from GPS only; there is no slip sensor.
+Harris Hill, Nov 6 check: this flagged 8 Dam Turn and 5 on the R3 with a worn rear, the two corners
+where the rider felt the rear stepping out. Inferred from GPS only; there is no slip sensor.
 
 Writes tire_check.csv (per session and turn) and tire_check.md.
 """
+import argparse
 import csv
 import os
 import sys
@@ -28,14 +31,22 @@ SLOW_FACTOR = 1.03
 
 
 def main():
-    out, files = sys.argv[1], sys.argv[2:]
+    ap = argparse.ArgumentParser(description="Tire-wear signal for one bike, one direction, one day.")
+    ap.add_argument("out")
+    ap.add_argument("files", nargs="+")
+    ap.add_argument("--turns", help="turn table to use (turn,name,lat,lon) instead of the track's own")
+    a = ap.parse_args()
+    out, files = a.out, a.files
     os.makedirs(out, exist_ok=True)
-    sess = sorted([tc.load(f) for f in files], key=lambda s: s["name"])
+    sess, _ = tc.load_day(files)
+    sess.sort(key=lambda s: s["name"])
     laps = tc.full_laps(sess)
     best = min(laps, key=lambda l: l["time"])
     laps = [l for l in laps if l["dir"] == best["dir"] and l["time"] <= best["time"] * SLOW_FACTOR]
     ref = tc.Ref(best)
-    T = tc.turns(ref)
+    T = tc.turns(ref, a.turns, out)
+    if not T:
+        sys.exit(tc.NO_TURNS)
     rows = []
     for l in laps:
         d, off, _ = ref.project(l)
