@@ -10,6 +10,7 @@ each day full screen on a laptop or TV. Licensed AGPL-3.0 (see `LICENSE`).
 - `scripts/` analysis tools (Python). `run_day.py` is the one command that runs the rest.
 - `tracks/<id>/` one folder per known track: `track.json`, `turns.csv` (official turn numbers) and
   other reference files. `tracks/harris-hill/` (Harris Hill Road, San Marcos, TX) is the home track.
+- `bikes/<id>.json` one file per known bike: its gearbox ratios, for working out gear from revs.
 - `viewer/` local web app: `lapviewer.py` (standard library only) serves `static/` (plain HTML, CSS,
   SVG, no libraries) on `127.0.0.1` and runs `../scripts/run_day.py` for each new or changed day.
 - `tests/` unit tests on made-up laps (they need no lap data).
@@ -58,8 +59,13 @@ each day full screen on a laptop or TV. Licensed AGPL-3.0 (see `LICENSE`).
   slower than 103% of the day's best.
 - The first session of a day is a warm-up; judge the day from session two on.
 - Ideal lap = the sum of the best time in each section across the day's laps.
-- Throttle and braking are inferred from GPS speed and acceleration (and IMU g). There is no
-  throttle, brake or RPM channel in these logs.
+- Throttle and braking are inferred from GPS speed and acceleration (and IMU g). The R3 and Ninja
+  400 logs have no throttle, brake or RPM channel. The R7 logs have ECU channels: engine speed is
+  real, the throttle channel is present but flat, and there is no gear or brake channel.
+- Never show a channel because it exists: check that it moves. Never show a number worked out
+  from data without a guard that refuses when the data does not support it (the grip outline, the
+  gear fit and the GPS-dropout check are the patterns to follow), and say on screen when a figure
+  is an estimate.
 - Tire-wear signal: a turn whose mid-corner speed and grip fall in every session.
 - Sessions can sit a few metres apart in GPS; align before comparing sessions or days.
 
@@ -70,7 +76,7 @@ each day full screen on a laptop or TV. Licensed AGPL-3.0 (see `LICENSE`).
 - Never commit lap data: no `.xrk`/`.xrz`/`.drk`, nothing from `raw/` or `output/`, no result
   CSV, JSON or PNG. Lap data lives outside this repo. Screenshots of real laps only after checking
   they hold no personal data. The `.gitignore` enforces most of this; keep it. Track definitions
-  in `tracks/` are reference data, not lap data, and are committed.
+  in `tracks/` and bike definitions in `bikes/` are reference data, not lap data, and are committed.
 - Never commit personal data. `.xrk` filenames contain the rider's full name, so don't copy
   filenames into code, docs or tests. No names, emails, cloud folder or file ids, or absolute
   paths. Grep the staged diff for these before every commit.

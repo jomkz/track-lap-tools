@@ -105,6 +105,7 @@ function render() {
   hideTip();
   const d = S.day, main = $("#main");
   document.querySelectorAll(".tab").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.view === S.view)));
+  $('.tab[data-view="engine"]').hidden = !hasEngine(d);      // only for days whose logs carry engine channels
   $("#prev").disabled = S.idx >= S.days.length - 1;
   $("#next").disabled = S.idx <= 0;
   if (!d) {
@@ -122,6 +123,7 @@ function render() {
   else if (S.view === "delta") renderDelta(main, d);
   else if (S.view === "grip") renderGrip(main, d);
   else if (S.view === "stint") renderStint(main, d);
+  else if (S.view === "engine") renderEngine(main, d);
   else renderBoard(main, d);
 }
 
@@ -949,6 +951,163 @@ function toggleStintX() {
   render();
 }
 
+// ---------------------------------------------------------------- 7. engine (only for logs with ECU channels)
+const ROLE_LABEL = { rpm: "Engine speed", throttle: "Throttle", brake: "Brake", gear: "Gear" };
+const GEAR_COLORS = ["var(--line)", "#184f95", "#256abf", "#3987e5", "#6da7ec", "#9ec5f4", "#cde2fb", "#cde2fb"];
+const hasEngine = (d) => !!(d && d.engine);
+
+function channelNotes(E) {
+  return Object.entries(ROLE_LABEL).map(([role, label]) => {
+    const c = E.channels[role] || { state: "missing" };
+    if (role === "gear" && c.state !== "ok") {
+      if (E.gear_from === "rpm and speed") {
+        return `<span class="ch ok"><b>Gear</b> worked out from revs and speed with the ${esc(E.gear_fit.bike)} gearbox (${E.gear_fit.pct}% of steady samples sit on a gear). Not measured: check it against a corner where you know your gear.</span>`;
+      }
+      return `<span class="ch off"><b>Gear</b> ${esc(E.gear_note || "no channel in these logs.")}</span>`;
+    }
+    if (c.state === "ok") return `<span class="ch ok"><b>${label}</b> from the ${esc(c.name)} channel.</span>`;
+    if (c.state === "flat") return `<span class="ch warn"><span class="flag">&#9888;</span> <b>${label}</b>: the ${esc(c.name)} channel is in the log but never moves (${esc(c.note)}), so it is not shown. Check the logger's ECU setup.</span>`;
+    if (c.state === "partial") return `<span class="ch warn"><span class="flag">&#9888;</span> <b>${label}</b>: the ${esc(c.name)} channel is not in every session, so it is not shown.</span>`;
+    return `<span class="ch off"><b>${label}</b>: no channel in these logs.</span>`;
+  }).join("");
+}
+
+// the track coloured by gear on the best lap
+function drawGearMap(parent, d) {
+  const E = d.engine, T = E.laps[E.best], P = d.path;
+  const xs = P.x, ys = P.y.map((v) => -v);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const span = Math.max(maxX - minX, maxY - minY), pad = span * 0.1;
+  const svg = el("svg", { viewBox: `${minX - pad} ${minY - pad} ${maxX - minX + 2 * pad} ${maxY - minY + 2 * pad}`, role: "img", "aria-label": "Track map coloured by gear" }, parent);
+  const lw = span * 0.024, fs = span * 0.045;
+  const gearAt = (dist) => T.gear[Math.max(0, Math.min(T.gear.length - 1, Math.round(dist / E.step_m)))];
+  let run = [0], cur = gearAt(P.d[0]);
+  const flush = () => {
+    if (run.length < 2) return;
+    el("polyline", { points: run.map((i) => `${xs[i]},${ys[i]}`).join(" "), fill: "none", stroke: GEAR_COLORS[cur] || GEAR_COLORS[0],
+      "stroke-width": lw, "stroke-linecap": "round", "stroke-linejoin": "round" }, svg);
+  };
+  for (let i = 1; i < xs.length; i++) {
+    const g = gearAt(P.d[i]);
+    run.push(i);
+    if (g !== cur) { flush(); run = [i]; cur = g; }
+  }
+  run.push(0); flush();
+  for (const a of d.apexes) {
+    const dx = a.x - (minX + maxX) / 2, dy = -a.y - (minY + maxY) / 2, n = Math.hypot(dx, dy) || 1;
+    const t = el("text", { x: a.x + (dx / n) * span * 0.07, y: -a.y + (dy / n) * span * 0.07, "text-anchor": "middle", "dominant-baseline": "middle", "font-size": fs, "font-weight": 700 }, svg);
+    t.textContent = short(a.label);
+  }
+}
+
+function renderEngine(main, d) {
+  const E = d.engine;
+  if (!E) {
+    main.innerHTML = `<div class="empty"><p>No engine channels in this day's logs.</p>
+      <p class="note">This view needs engine speed, throttle, brake or gear from the bike's ECU, logged through the Solo DL.</p></div>`;
+    return;
+  }
+  const status = document.createElement("div");
+  status.className = "panel chans";
+  status.innerHTML = channelNotes(E);
+  main.appendChild(status);
+  const B = E.laps[E.best];
+  if (!B) return;       // channels are in the log but none carries a signal: the notes above say which
+  const c = d.corners.find((x) => x.name === S.corner) || d.corners[0];
+  const ec = new Map(E.corners.map((x) => [x.name, x]));
+  const chips = document.createElement("div");
+  chips.className = "corner-list";
+  chips.innerHTML = d.corners.map((x) => {
+    const g = ec.get(x.name), b = g && g.best_lap;
+    const tag = !b ? "" : b.apex_gear ? `gear ${b.apex_gear}` : b.apex_rpm != null ? `${b.apex_rpm} rpm` : "";
+    return `<button aria-pressed="${x.name === c.name}" data-c="${esc(x.name)}"><span>${esc(x.name.replace(/\+/g, " + "))}</span><span class="lv">${tag}</span></button>`;
+  }).join("");
+  chips.addEventListener("click", (ev) => {
+    const b = ev.target.closest("button");
+    if (b) { S.corner = b.dataset.c; render(); }
+  });
+  main.appendChild(chips);
+
+  const wrap = document.createElement("div");
+  wrap.className = "split";
+  main.appendChild(wrap);
+  const left = document.createElement("div");
+  left.className = "panel col";
+  const right = document.createElement("div");
+  right.className = "panel col engside";
+  wrap.append(left, right);
+
+  // traces through the picked corner: best lap against the fastest run through it
+  const g = ec.get(c.name) || {};
+  const F = E.laps[g.fastest] || B;
+  const L = d.lap_length_m, c0 = c.wrap ? c.d0 - L : c.d0, c1 = c.d1;
+  const ext = (arr) => { const out = []; for (const off of [-L, 0, L]) E.d.forEach((x, i) => out.push([x + off, arr[i]])); return out; };
+  const apexes = [];
+  for (const off of [-L, 0, L]) d.apexes.forEach((a) => apexes.push({ ...a, d: a.d + off }));
+  const near = (m) => (m == null ? null : c.wrap && m > c1 ? m - L : m);
+  const marks = [];
+  const ab = near(g.best_lap && g.best_lap.apex_m), af = near(g.fastest_run && g.fastest_run.apex_m);
+  if (ab != null) marks.push({ x: ab, color: "var(--series-best)", label: "best lap slowest", row: 0, left: af != null && af > ab });
+  if (af != null && g.fastest !== E.best) marks.push({ x: af, color: "var(--series-ideal)", label: "fastest run slowest", row: 1, left: af < ab });
+  if (B.gear) {         // gear changes on the best lap
+    for (let i = 1; i < E.d.length; i++) {
+      if (B.gear[i] && B.gear[i - 1] && B.gear[i] !== B.gear[i - 1]) {
+        for (const off of [-L, 0, L]) marks.push({ x: E.d[i] + off, color: "var(--text-muted)", label: `${B.gear[i] > B.gear[i - 1] ? "↑" : "↓"}${B.gear[i]}`, row: 2 });
+      }
+    }
+  }
+  const same = g.fastest === E.best;
+  left.innerHTML = `<h2>${esc(c.name.replace(/\+/g, " + "))} <span class="note">(best lap against the fastest run through it${same ? ", which is the best lap" : `, ${esc((g.fastest || "").replace(":", " lap "))}`})</span></h2>
+    <div class="legend"><span><span class="sw" style="background:var(--series-best)"></span>Best lap ${esc(d.best)}</span>
+    ${same ? "" : '<span><span class="sw" style="background:var(--series-ideal)"></span>Fastest run through this corner</span>'}
+    ${B.gear ? '<span class="note">&uarr;4 = a change up to 4th on the best lap</span>' : ""}</div>`;
+  const rows = [["rpm", "Engine speed (rpm)", 1500, (y) => String(Math.round(y)), (v) => `<b>${Math.round(v)}</b> rpm`],
+    ["thr", "Throttle (% of its range)", 20, (y) => `${Math.round(y)}`, (v) => `<b>${Math.round(v)}</b>%`],
+    ["brk", "Brake (% of its range)", 20, (y) => `${Math.round(y)}`, (v) => `<b>${Math.round(v)}</b>%`]].filter(([k]) => B[k]);
+  rows.forEach(([k, title, minRange, yFmt, tipFmt], i) => {
+    const h = document.createElement("div");
+    h.className = "note chart-title";
+    h.textContent = title;
+    left.appendChild(h);
+    const series = [{ name: "Best lap", color: "var(--series-best)", pts: ext(B[k]) }];
+    if (!same && F[k]) series.push({ name: "Fastest run", color: "var(--series-ideal)", pts: ext(F[k]) });
+    lineChart(left, { x0: c0 - 40, x1: c1 + 40, apexes, marks: i === 0 ? marks : marks.filter((m) => m.row < 2), series, minRange, yFmt, tipFmt });
+  });
+
+  // map by gear, then the numbers per corner
+  if (B.gear) {
+    const used = [...new Set(B.gear.filter((x) => x > 0))].sort();
+    const mh = document.createElement("div");
+    mh.innerHTML = `<h2>Gear round the best lap</h2><div class="legend">${used.map((x) => `<span><span class="sw" style="background:${GEAR_COLORS[x]}"></span>${x}</span>`).join("")}
+      <span><span class="sw" style="background:${GEAR_COLORS[0]}"></span>changing gear or no fit</span></div>`;
+    right.appendChild(mh);
+    const mbox = document.createElement("div");
+    mbox.className = "chart gearmap";
+    right.appendChild(mbox);
+    requestAnimationFrame(() => { if (mbox.isConnected) drawGearMap(mbox, d); });
+  }
+  const has = (k) => E.corners.some((x) => x.best_lap && x.best_lap[k] != null);
+  const cols = [["apex_gear", "Gear", (v) => (v ? String(v) : "&ndash;")], ["apex_rpm", "Revs", (v) => String(v)], ["min_rpm", "Lowest", (v) => String(v)],
+    ["exit_rpm", "At exit", (v) => String(v)], ["throttle_on_m", "Throttle on", (v) => `${v >= 0 ? "+" : "&minus;"}${Math.abs(v).toFixed(0)} m`],
+    ["coast_s", "Coasting", (v) => `${v.toFixed(2)} s`]].filter(([k]) => has(k));
+  const cellsOf = (o) => cols.map(([k, , f]) => `<td class="num">${o && o[k] != null ? f(o[k]) : ""}</td>`).join("");
+  const tb = document.createElement("div");
+  tb.className = "engtable";
+  tb.innerHTML = `<h2>At the slowest point of each corner <span class="note">(best lap, then the fastest run through it in grey)</span></h2>
+    <table class="lean eng"><thead><tr><th>Corner</th><th class="num">Speed</th>${cols.map(([, h]) => `<th class="num">${h}</th>`).join("")}</tr></thead><tbody>
+    ${E.corners.map((x) => `<tr class="${x.name === c.name ? "on" : ""}" data-c="${esc(x.name)}"><td class="lbl">${esc(turnsIn(x.name).join("+") || x.name)}</td>
+      <td class="num">${x.best_lap ? `${spd(x.best_lap.apex_kph).toFixed(0)} ${unit()}` : ""}</td>${cellsOf(x.best_lap)}</tr>
+      ${x.fastest === E.best ? "" : `<tr class="alt" data-c="${esc(x.name)}"><td class="lbl sub2">${esc((x.fastest || "").replace(":", " L"))}</td>
+      <td class="num">${x.fastest_run ? `${spd(x.fastest_run.apex_kph).toFixed(0)} ${unit()}` : ""}</td>${cellsOf(x.fastest_run)}</tr>`}`).join("")}</tbody></table>
+    <p class="note">${E.full_throttle_pct != null ? `Full throttle for <b>${E.full_throttle_pct.toFixed(0)}%</b> of the best lap. ` : ""}Revs are as the ECU sends them (about 10 a second).
+    ${has("throttle_on_m") ? "Throttle on = where the throttle comes back and stays on, in metres after the slowest point (minus = before it). Coasting = seconds in the corner with the throttle shut and the brake off. " : ""}Up and down keys change corner.</p>`;
+  tb.querySelector("tbody").addEventListener("click", (ev) => {
+    const tr = ev.target.closest("tr[data-c]");
+    if (tr) { S.corner = tr.dataset.c; render(); }
+  });
+  right.appendChild(tb);
+}
+
 // ---------------------------------------------------------------- input
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setView(t.dataset.view)));
 function setView(v) {
@@ -971,11 +1130,12 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "4") setView("delta");
   else if (e.key === "5") setView("grip");
   else if (e.key === "6") setView("stint");
+  else if (e.key === "7" && hasEngine(S.day)) setView("engine");
   else if ((e.key === "x" || e.key === "X") && S.view === "stint") toggleStintX();
   else if (e.key === "f" || e.key === "F") toggleFs();
   else if (e.key === "ArrowLeft") $("#prev").click();
   else if (e.key === "ArrowRight") $("#next").click();
-  else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && S.view === "grip" && S.day) {
+  else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && (S.view === "grip" || S.view === "engine") && S.day) {
     const cs = S.day.corners, i = cs.findIndex((c) => c.name === S.corner);     // riding order
     S.corner = cs[Math.max(0, Math.min(cs.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))].name;
     render();

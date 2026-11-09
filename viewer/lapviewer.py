@@ -11,9 +11,10 @@ What it does
        existing tools (../scripts/run_day.py) into its own data folder. The analysis is the same
        code as the cloud runs: lap table and direction, ideal lap, time lost by section, tire-wear
        signal, and the cost of a cone chicane where the track defines one. A day is analysed again
-       when its files, the scripts or a track definition (../tracks/) change.
+       when its files, the scripts, a track definition (../tracks/) or a bike definition (../bikes/)
+       change.
     3. Serves views of each day: session board, track map of time lost, corner compare, time delta,
-       lean and grip, stint.
+       lean and grip, stint, and engine data on days whose logs carry ECU channels.
     4. Writes a small summary of each day and session (JSON and CSV, about 170 KB a day) into
        "summary_folder", which can be a folder synced to Google Drive.
 
@@ -45,6 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.dirname(HERE)                      # the repository folder
 SCRIPTS = os.path.join(TOOLS, "scripts")
 TRACKS = os.path.join(TOOLS, "tracks")
+BIKES = os.path.join(TOOLS, "bikes")
 STATIC = os.path.join(HERE, "static")
 CONFIG_PATH = os.path.join(HERE, "config.json")
 
@@ -136,9 +138,10 @@ NO_TRACK = {"id": "", "name": "", "known": False, "turn_numbers": "", "turns_not
 
 
 def tools_sig():
-    """Changes when an analysis script or a track definition changes, so cached days are redone."""
+    """Changes when an analysis script, a track definition or a bike definition changes, so cached
+    days are redone."""
     h = hashlib.sha1()
-    for root in (SCRIPTS, TRACKS):
+    for root in (SCRIPTS, TRACKS, BIKES):
         for dp, dn, fs in os.walk(root):
             dn[:] = sorted(d for d in dn if d != "__pycache__")
             for f in sorted(fs):
@@ -212,7 +215,7 @@ def day_bundle(folder, cfg, date_sessions=None):
         "gap_s": round(v["best_lap"]["time_s"] - ideal, 3), "ideal_whole_corners_s": v["ideal_whole_corners_s"],
         "laps_used": v["laps_used"], "lap_length_m": v["lap_length_m"], "geometry_from": v["geometry_from"],
         "path": v["path"], "sections": v["sections"], "corners": v["corners"], "apexes": v["apexes"],
-        "trace": v["trace"], "delta": v.get("delta"), "stint": v.get("stint"), "grip": v.get("grip"), "sessions": out_sessions, "laps": lap_rows, "tire": tire,
+        "trace": v["trace"], "delta": v.get("delta"), "stint": v.get("stint"), "grip": v.get("grip"), "engine": v.get("engine"), "sessions": out_sessions, "laps": lap_rows, "tire": tire,
         "tire_flags": parse_tire_md(os.path.join(folder, "tire_check.md")),
         "chicane": parse_chicane_md(os.path.join(folder, "chicane.md")), "corner_phases": phases,
         "ramp": {"label": cfg["ramp_label"], "targets_min": targets},

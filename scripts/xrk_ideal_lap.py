@@ -73,6 +73,18 @@ Outputs (OUT_DIR): sections.csv, lap_sections.csv, corners.csv, corner_phases.cs
                    gyro: how well the logger's gyro follows the GPS lean rate (r), a cross-check.
                    All of it is an estimate from GPS: hanging off, tire width, banking and
                    crests are not in it.
+    engine       : for the viewer, only when the logs carry ECU channels. Engine speed, throttle,
+                   brake and gear are found by channel name or by the function the logger gives
+                   them (lap_views.ROLE_NAMES). A channel is used only when every session has it
+                   and it moves; one that is in the log but flat (not wired, or not sent by the
+                   ECU) is reported as flat and never drawn. Throttle and brake are shown as a
+                   percentage of the range they covered that day. With no gear channel, gear is
+                   worked out from revs and GPS speed when the bike's gearbox ratios are known
+                   (bikes/, lap_views.gears_from_ratios), and not shown otherwise: guessing the
+                   gearbox from the data gave different gears on different days. Per corner, for the best lap and the
+                   fastest run through it: speed, revs and gear at the slowest point, lowest revs,
+                   revs at the exit, and with a throttle channel where the throttle comes back on
+                   relative to the slowest point and the seconds spent coasting.
 """
 import argparse
 import contextlib
@@ -88,6 +100,7 @@ from scipy.signal import find_peaks, savgol_filter
 from libxrk import aim_xrk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import bikes  # noqa: E402
 import lap_rules  # noqa: E402
 import lap_views  # noqa: E402
 import tracks  # noqa: E402
@@ -128,7 +141,24 @@ def load(path):
                              np.array(ch[k].column(1).to_pylist(), float)) for k in ("RollRate", "YawRate", "PitchRate")}
     except (KeyError, IndexError, ValueError):
         gyro = None
-    return {"name": name, "t": t, "v": v, "lat": lat, "lon": lon, "glat": glat, "gyro": gyro,
+    # engine channels from the ECU, when the bike sends any: each on the GPS clock, with whether it carries a signal
+    meta = {}
+    for n in ch:
+        md = {k.decode(): val.decode() for k, val in (ch[n].schema.field(1).metadata or {}).items()}
+        meta[n] = {"units": md.get("units", ""), "function": md.get("function", "")}
+    eng = {}
+    for role, n in lap_views.channel_roles(meta).items():
+        if n is None:
+            continue
+        tc = np.array(ch[n].column(0).to_pylist(), float) / 1000.0
+        vc = np.array(ch[n].column(1).to_pylist(), float)
+        if len(tc) < 2:
+            continue
+        on_gps = vc[np.clip(np.searchsorted(tc, t, side="right") - 1, 0, len(vc) - 1)] if role == "gear" else np.interp(t, tc, vc)
+        state, why = lap_views.channel_state(vc, role)
+        eng[role] = {"name": n, "raw": on_gps, "own_t": tc, "own": vc, "state": state,
+                     "note": f"{why} {meta[n]['units']}".strip() if why else ""}
+    return {"name": name, "t": t, "v": v, "lat": lat, "lon": lon, "glat": glat, "gyro": gyro, "eng": eng,
             "laps": log.laps.to_pylist(), "vehicle": log.metadata.get("Vehicle"),
             "date": log.metadata.get("Log Date"), "venue": log.metadata.get("Venue") or ""}
 
@@ -780,6 +810,102 @@ def main():
                 "gg": {"d": [round(float(x), 1) for x in f_d[m_fast][thin]], "lat100": c100(f_lat[m_fast][thin]),
                        "lon100": c100(f_lon[m_fast][thin])}}
 
+    # engine view: only when the logs carry ECU channels. A channel counts when every session has it and
+    # it moves; one that is there but flat is reported as such and never drawn.
+    def role_state(role):
+        have = [s_["eng"].get(role) for s_ in sessions]
+        if not any(have):
+            return {"name": None, "state": "missing", "note": ""}
+        name = next(h["name"] for h in have if h)
+        if not all(have):
+            return {"name": name, "state": "partial", "note": "not in every session"}
+        flat = [h for h in have if h["state"] != "ok"]
+        if flat:
+            return {"name": name, "state": "flat", "note": flat[0]["note"]}
+        return {"name": name, "state": "ok", "note": ""}
+
+    chan = {role: role_state(role) for role in lap_views.ROLE_NAMES}
+    live = {role for role, c in chan.items() if c["state"] == "ok"}
+    engine = None
+    if any(c["state"] != "missing" for c in chan.values()):
+        engine = {"channels": chan, "gear_from": None, "gear_note": "", "gears": [], "laps": {}, "corners": [],
+                  "full_throttle_pct": None}
+    if live:
+        for s_ in sessions:
+            s_["thr"] = lap_views.percent_of_range(s_["eng"]["throttle"]["raw"]) if "throttle" in live else None
+            s_["brk"] = lap_views.percent_of_range(s_["eng"]["brake"]["raw"]) if "brake" in live else None
+            s_["rpm"] = s_["eng"]["rpm"]["raw"] if "rpm" in live else None
+            s_["gear"] = np.round(s_["eng"]["gear"]["raw"]).astype(int) if "gear" in live else None
+        bike = bikes.match(ref["s"]["vehicle"])
+        if "gear" in live:
+            engine["gear_from"] = "channel"
+        elif "rpm" not in live:
+            engine["gear_note"] = "No gear channel in these logs."
+        elif not (bike and bike["gear_ratios"]):
+            engine["gear_note"] = ("No gear channel in these logs. Gear can be worked out from revs and speed once this "
+                                   "bike's gearbox ratios are in bikes/ (see scripts/bikes.py).")
+        else:       # no gear channel: fit the bike's gearbox to revs and speed, over the whole day's riding
+            found = lap_views.gears_from_ratios([(s_["t"], s_["vs"], s_["gld"], s_["eng"]["rpm"]["own_t"], s_["eng"]["rpm"]["own"])
+                                                 for s_ in sessions], bike["gear_ratios"])
+            if found:
+                for s_, g in zip(sessions, found["gears"]):
+                    s_["gear"] = g
+                engine["gear_from"] = "rpm and speed"
+                engine["gear_fit"] = {"pct": round(100 * found["fit"]), "lag_s": found["lag_s"], "tyre_crown": found["tyre_crown"],
+                                      "bike": bike["name"]}
+                engine["gears"] = [{"gear": i + 1, "rpm_per_kph": round(x, 1)} for i, x in enumerate(found["rpm_per_kph"])]
+            else:
+                engine["gear_note"] = (f"No gear channel in these logs, and the revs do not fit the {bike['name']} gearbox "
+                                       "in bikes/ clearly enough to work the gears out.")
+        egrid = lap_views.lap_grid(L_ref, 5.0)
+
+        def traces(L):
+            s_, i = L["s"], L["idx"]
+            lin = lambda arr: np.interp(egrid, L["prog"], arr[i])
+            step = np.clip(np.searchsorted(L["prog"], egrid), 0, len(i) - 1)        # gear: the sample there, not a blend
+            return {"kph": lin(s_["vs"]) * 3.6, "t": lap_views.clock_at(curve(L), egrid),
+                    "rpm": lin(s_["rpm"]) if s_["rpm"] is not None else None,
+                    "gear": s_["gear"][i][step] if s_["gear"] is not None else None,
+                    "thr": lin(s_["thr"]) if s_["thr"] is not None else None,
+                    "brk": lin(s_["brk"]) if s_["brk"] is not None else None}
+
+        key_of = lambda L: f"{L['s']['name']}:{L['num']}"
+        tr = {key_of(L): traces(L) for L in [fast] + [c["best_lap"] for c in corners]}
+
+        def corner_numbers(L, c):
+            T = tr[key_of(L)]
+            m = in_sec(egrid, c, L_ref)
+            j = np.flatnonzero(m)
+            if c["wrap"]:                               # ride order: the end of the lap, then its start
+                j = np.concatenate([j[egrid[j] >= c["d0"]], j[egrid[j] <= c["d1"]]])
+            if len(j) < 3:
+                return None
+            along = np.where(egrid[j] >= c["d0"], egrid[j] - c["d0"], egrid[j] + L_ref - c["d0"]) if c["wrap"] else egrid[j] - c["d0"]
+            a = int(np.argmin(T["kph"][j]))
+            out = {"apex_m": round(float(egrid[j][a]), 1), "apex_kph": round(float(T["kph"][j][a]), 1)}
+            if T["rpm"] is not None:
+                out.update(apex_rpm=int(round(float(T["rpm"][j][a]), -1)), min_rpm=int(round(float(T["rpm"][j].min()), -1)),
+                           exit_rpm=int(round(float(T["rpm"][j][-1]), -1)))
+            if T["gear"] is not None:
+                out["apex_gear"] = int(T["gear"][j][a])
+            if T["thr"] is not None:
+                on = lap_views.throttle_pickup_m(along, T["thr"][j], float(along[a]))
+                tt = np.where(egrid[j] >= c["d0"], T["t"][j], T["t"][j] + T["t"][-1]) if c["wrap"] else T["t"][j]
+                out["throttle_on_m"] = None if on is None else round(on, 0)
+                out["coast_s"] = round(lap_views.coast_seconds(tt, T["thr"][j], T["brk"][j] if T["brk"] is not None else None), 2)
+            return out
+
+        ints = lambda arr, unit=1: None if arr is None else [int(round(float(x) / unit)) * unit for x in arr]
+        engine["step_m"] = 5.0
+        engine["d"] = [round(float(x), 1) for x in egrid]
+        engine["best"] = key_of(fast)
+        engine["laps"] = {k: {"kph": [round(float(x), 1) for x in T["kph"]], "rpm": ints(T["rpm"], 10), "gear": ints(T["gear"]),
+                              "thr": ints(T["thr"]), "brk": ints(T["brk"])} for k, T in tr.items()}
+        engine["corners"] = [{"name": c["name"], "fastest": key_of(c["best_lap"]), "best_lap": corner_numbers(fast, c),
+                              "fastest_run": corner_numbers(c["best_lap"], c)} for c in corners]
+        if fast["s"]["thr"] is not None:
+            engine["full_throttle_pct"] = round(lap_views.full_throttle_pct(fast["s"]["thr"][fast["idx"]][in_lap(fast)]), 1)
+
     # viewer.json: the same map and trace numbers as the PNGs, for the pit lap viewer (viewer/)
     import json
     step = max(1, len(rd) // 600)
@@ -809,6 +935,7 @@ def main():
                     "y": round(float(ry[p]), 1), "side": apex_side[ci]} for ci, p in enumerate(pk)],
         "trace": {"d": r3(grid_d[::2]), "best_kph": r3(best_v[::2]), "ideal_kph": r3(comp_v[::2])},
         "delta": delta, "stint": {"min_trend_laps": lap_views.MIN_TREND_LAPS, "sessions": stint}, "grip": grip,
+        "engine": engine,
     }, open(os.path.join(a.out, "viewer.json"), "w"), separators=(",", ":"))
 
     print("\n".join(lines))

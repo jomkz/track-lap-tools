@@ -338,5 +338,178 @@ class Gyro(unittest.TestCase):
         self.assertIsNone(lv.gyro_agreement(np.zeros(1000), np.zeros(1000), np.zeros(1000), np.zeros(1000)))
 
 
+class EngineChannels(unittest.TestCase):
+    def test_roles_by_name_and_by_function(self):
+        meta = {"GPS Speed": {"units": "m/s", "function": ""},
+                "RPM": {"units": "rpm", "function": "Engine RPM"},
+                "ThrottlePosition": {"units": "%", "function": "Percentage Throttle Load"},
+                "CoolantTemp": {"units": "C", "function": "Water Temperature"},
+                "VehicleSpeed": {"units": "km/h", "function": "Vehicle Speed"}}
+        self.assertEqual(lv.channel_roles(meta), {"rpm": "RPM", "throttle": "ThrottlePosition", "brake": None, "gear": None})
+        other = {"Eng Speed": {"units": "rpm", "function": "Engine RPM"}, "TPS": {"units": "%", "function": ""},
+                 "F Brake Press": {"units": "bar", "function": ""}, "Gear": {"units": "", "function": "Gear"},
+                 "Brake Temp": {"units": "C", "function": "Brake Temperature"}}
+        self.assertEqual(lv.channel_roles(other), {"rpm": "Eng Speed", "throttle": "TPS", "brake": "F Brake Press", "gear": "Gear"})
+        self.assertEqual(lv.channel_roles({"GPS Speed": {"units": "m/s", "function": ""}}),
+                         {"rpm": None, "throttle": None, "brake": None, "gear": None})
+
+    def test_a_channel_that_never_moves_is_flat(self):
+        self.assertEqual(lv.channel_state(np.full(5000, 0.001), "throttle"), ("flat", "always 0.001"))
+        self.assertEqual(lv.channel_state(np.linspace(0, 100, 5000), "throttle"), ("ok", ""))
+        self.assertEqual(lv.channel_state(np.linspace(900, 1200, 5000), "rpm")[0], "flat")     # idling in the pits all session
+        self.assertEqual(lv.channel_state(np.linspace(3000, 10000, 5000), "rpm"), ("ok", ""))
+        self.assertEqual(lv.channel_state(np.array([1.0, 2.0]), "gear")[0], "flat")            # almost no samples
+        self.assertEqual(lv.channel_state(np.r_[np.zeros(4990), np.ones(10)], "brake"), ("ok", ""))    # a brake switch, rarely on, is a signal
+        self.assertEqual(lv.channel_state(np.tile([0.0, 1.0, 2.0, 3.0], 500), "gear"), ("ok", ""))
+
+    def test_percent_of_range_whatever_the_unit(self):
+        volts = np.r_[np.full(100, 0.5), np.linspace(0.5, 4.5, 800), np.full(100, 4.5)]
+        pct = lv.percent_of_range(volts)
+        self.assertAlmostEqual(float(pct.min()), 0.0)
+        self.assertAlmostEqual(float(pct.max()), 100.0)
+        self.assertAlmostEqual(float(lv.percent_of_range(volts)[500]), 50.0, delta=1.0)
+
+
+class Gears(unittest.TestCase):
+    BOX = [2.846, 2.125, 1.632, 1.300, 1.091, 0.964]       # gearbox ratios, 1st to 6th
+    SCALE = 45.4                                            # revs per km/h for a ratio of 1 (drive and tyre)
+
+    def ride(self, gears_used, lean=False, seconds=400, hz=25.0, seed=2, box=None, each=8):
+        """Runs through the gears again and again, `each` seconds in a gear with the revs climbing;
+        with lean=True, half of it leaned over at 45 degrees."""
+        rng = np.random.default_rng(seed)
+        t = np.arange(0, seconds, 1 / hz)
+        gear = np.array(gears_used)[(t // each).astype(int) % len(gears_used)]
+        ratio = self.SCALE * np.array(box or self.BOX)[gear - 1]
+        rpm = 5500 + 4000 * ((t % each) / each)
+        lat = np.where((t // 4).astype(int) % 2 == 1, 1.0, 0.0) if lean else np.zeros(len(t))
+        shrink = 1.0 - lv.TYRE_CROWN * (1.0 - np.cos(np.arctan(lat)))              # the tyre rolls on a smaller radius
+        v = rpm / ratio * shrink / 3.6
+        return rpm + rng.normal(0, 20, len(t)), v, lat, t, gear
+
+    def fit(self, ride, box=None, late=0.0):
+        """late: seconds by which the GPS speed trails the revs in the made-up log."""
+        rpm, v, lat, t, _ = ride
+        return lv.gears_from_ratios([(t, v, lat, t - late, rpm)], box or self.BOX)
+
+    def settled(self, t, every=8):
+        return (t % every > 1) & (t % every < every - 1)    # away from the gear changes
+
+    def test_gears_get_their_real_numbers(self):
+        ride = self.ride([1, 2, 3, 4, 5, 6])
+        rpm, v, lat, t, truth = ride
+        got = self.fit(ride)
+        np.testing.assert_allclose(got["rpm_per_kph"], self.SCALE * np.array(self.BOX), rtol=0.01)
+        self.assertGreater(float(np.mean(got["gears"][0][self.settled(t)] == truth[self.settled(t)])), 0.99)
+        self.assertGreater(got["fit"], 0.9)
+
+    def test_a_day_without_first_gear_is_still_numbered_right(self):
+        ride = self.ride([2, 3, 4, 5])                                  # the pit exit was not logged
+        rpm, v, lat, t, truth = ride
+        got = self.fit(ride)
+        self.assertGreater(float(np.mean(got["gears"][0][self.settled(t)] == truth[self.settled(t)])), 0.99)
+        self.assertEqual(sorted(set(got["gears"][0][self.settled(t)])), [2, 3, 4, 5])
+
+    def test_three_gears_that_fit_two_ways_are_refused(self):
+        # 2nd, 3rd and 4th alone sit within a few percent of where 1st, 2nd and 3rd would: no honest answer
+        self.assertIsNone(self.fit(self.ride([2, 3, 4])))
+
+    def test_lean_does_not_turn_fourth_into_third(self):
+        ride = self.ride([2, 3, 4, 5], lean=True)
+        rpm, v, lat, t, truth = ride
+        got = self.fit(ride)
+        self.assertGreater(float(np.mean(got["gears"][0][self.settled(t, 4)] == truth[self.settled(t, 4)])), 0.98)
+        self.assertAlmostEqual(got["tyre_crown"], lv.TYRE_CROWN)
+        # without the lean correction the leaned samples of a gear read well on the way to the gear below
+        raw = rpm / (v * 3.6)
+        leaned, upright = raw[(lat > 0) & (truth == 4)], raw[(lat == 0) & (truth == 4)]
+        self.assertGreater(float(np.median(leaned) / np.median(upright)), 1.07)
+
+    def test_different_sprockets_need_no_change(self):
+        keep = self.SCALE
+        try:
+            self.SCALE = keep * 1.09                                    # a shorter final drive
+            ride = self.ride([2, 3, 4, 5])
+        finally:
+            self.SCALE = keep
+        rpm, v, lat, t, truth = ride
+        got = self.fit(ride)
+        self.assertGreater(float(np.mean(got["gears"][0][self.settled(t)] == truth[self.settled(t)])), 0.99)
+
+    def test_gps_speed_that_trails_the_revs_is_allowed_for(self):
+        ride = self.ride([2, 3, 4, 5], each=2)                          # hard acceleration: 2000 rpm a second
+        rpm, v, lat, t, truth = ride
+        got = self.fit(ride, late=0.2)
+        self.assertAlmostEqual(got["lag_s"], -0.2)
+        mid = (t % 2 > 0.7) & (t % 2 < 1.3)
+        self.assertGreater(float(np.mean(got["gears"][0][mid] == truth[mid])), 0.97)
+
+    def test_two_sessions_share_one_fit(self):
+        a, b = self.ride([2, 3, 4, 5], seed=1), self.ride([3, 4, 5, 6], seed=2)
+        got = lv.gears_from_ratios([(a[3], a[1], a[2], a[3], a[0]), (b[3], b[1], b[2], b[3], b[0])], self.BOX)
+        self.assertEqual(len(got["gears"]), 2)
+        self.assertEqual(sorted(set(got["gears"][1][self.settled(b[3])])), [3, 4, 5, 6])
+
+    def test_revs_that_do_not_fit_the_gearbox_give_no_gears(self):
+        rng = np.random.default_rng(4)
+        t = np.arange(0, 200, 0.04)
+        v = 20 + 15 * np.sin(t / 7.0)
+        flat = np.zeros(len(t))
+        self.assertIsNone(lv.gears_from_ratios([(t, v, flat, t, rng.uniform(3000, 10000, len(t)))], self.BOX))    # unrelated to speed
+        self.assertIsNone(lv.gears_from_ratios([(t, v, flat, t, np.full(len(t), 1200.0))], self.BOX))            # idling
+        self.assertIsNone(lv.gears_from_ratios([], self.BOX))
+        # another bike's gearbox: evenly spaced ratios do not line up with this one
+        self.assertIsNone(self.fit(self.ride([1, 2, 3, 4, 5], box=[3.0, 2.2, 1.6, 1.17, 0.86])))
+
+    def test_one_gear_alone_cannot_be_numbered(self):
+        self.assertIsNone(self.fit(self.ride([3])))                     # any gear fits a single ratio
+
+    def test_upright_ratio(self):
+        self.assertAlmostEqual(float(lv.upright_ratio(6000.0, 100 / 3.6, 0.0)), 60.0)
+        self.assertAlmostEqual(float(lv.upright_ratio(6000.0, 100 / 3.6, 1.0)), 60.0 * (1 - 0.28 * (1 - np.cos(np.pi / 4))), places=3)
+
+
+class Bikes(unittest.TestCase):
+    def setUp(self):
+        import bikes
+        self.b = bikes
+
+    def test_every_bike_file_loads_with_falling_ratios(self):
+        for bike in self.b.known():
+            r = bike["gear_ratios"]
+            self.assertTrue(all(y < x for x, y in zip(r, r[1:])), bike["id"])
+            self.assertTrue(bike["match"], bike["id"])
+
+    def test_matched_by_the_loggers_vehicle_name(self):
+        self.assertEqual(self.b.match("2022 Yamaha YZF-R7")["id"], "yamaha-yzf-r7")
+        self.assertEqual(self.b.match("2022 Yamaha YZF-R7 (Eagle)")["id"], "yamaha-yzf-r7")
+        self.assertIsNone(self.b.match("2015 Yamaha YZF-R3"))
+        self.assertIsNone(self.b.match(None))
+
+
+class Throttle(unittest.TestCase):
+    def test_pickup_after_the_apex(self):
+        d = np.arange(0, 300, 5.0)
+        th = np.where(d >= 180, 60.0, 0.0)
+        self.assertAlmostEqual(lv.throttle_pickup_m(d, th, 150.0), 30.0)
+        self.assertAlmostEqual(lv.throttle_pickup_m(d, th, 200.0), -20.0)      # already on before the slowest point
+        self.assertIsNone(lv.throttle_pickup_m(d, np.zeros(len(d)), 150.0))
+
+    def test_a_blip_is_not_the_pickup(self):
+        d = np.arange(0, 300, 5.0)
+        th = np.where(d >= 200, 60.0, 0.0)
+        th[(d >= 160) & (d < 170)] = 40.0               # 10 m of throttle, then shut again
+        self.assertAlmostEqual(lv.throttle_pickup_m(d, th, 150.0), 50.0)
+
+    def test_coasting_and_full_throttle(self):
+        t = np.arange(0, 10, 0.1)
+        th = np.r_[np.full(40, 100.0), np.zeros(30), np.full(30, 50.0)]
+        brk = np.r_[np.zeros(40), np.full(20, 80.0), np.zeros(40)]
+        self.assertAlmostEqual(lv.coast_seconds(t, th), 3.0, delta=0.11)       # throttle shut for 3 s
+        self.assertAlmostEqual(lv.coast_seconds(t, th, brk), 1.0, delta=0.11)  # 2 s of that was on the brake
+        self.assertAlmostEqual(lv.full_throttle_pct(th), 40.0)
+        self.assertEqual(lv.full_throttle_pct(np.array([])), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

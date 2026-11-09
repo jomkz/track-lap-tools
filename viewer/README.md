@@ -36,13 +36,13 @@ Other settings: `ramp_targets_min` (target minutes per session, session 1 first)
 
 A new or changed day is analysed in about 15 to 40 seconds; the status at the top right says
 what it is doing. Files still being copied are skipped until they stop changing. Every day is
-analysed again after the scripts or a track definition (`../tracks/`) change, for example after an
-update or after you edit a track's turn table.
+analysed again after the scripts, a track definition (`../tracks/`) or a bike definition
+(`../bikes/`) change, for example after an update or after you edit a track's turn table.
 
 ## The views
 
 Keys: the number on each tab switches to that view, left and right arrows change day, `F` toggles
-full screen, up and down arrows pick a corner on views 3 and 5, a lap on view 4 and a session on view 6.
+full screen, up and down arrows pick a corner on views 3, 5 and 7, a lap on view 4 and a session on view 6.
 Text sizes follow the screen width, so the same page reads on a laptop and a TV. The top bar names the day, the track, the bike and the
 direction, with the view tabs on the row below.
 
@@ -89,16 +89,29 @@ direction, with the view tabs on the row below.
    at braking and turn-in; time that goes missing on the way out points at drive and grip. A lap
    the GPS did not fully record shows its reason instead of numbers.
 
+7. **Engine:** only on days whose logs carry engine channels from the bike's ECU; the tab is
+   hidden on other days. The top panel says what was found: engine speed, throttle, brake and
+   gear, each by channel name. A channel that is in the log but never moves (not wired, or not
+   sent by the ECU) is called out and not drawn. For the picked corner it draws engine speed, and
+   throttle and brake when the log has them, best lap against the fastest run through the corner,
+   with the slowest point of each marked and the best lap's gear changes. On the right, the track
+   coloured by gear, and for every corner the speed, gear and revs at the slowest point, the
+   lowest revs and the revs at the exit; with a throttle channel also where the throttle comes
+   back on and how long the bike coasted. When the ECU sends no gear, gear is worked out from
+   revs and GPS speed, but only for a bike whose gearbox ratios are in `../bikes/` (see "Bikes" in
+   the main README), and the view says it is worked out, not measured.
+
 ![Map](screenshots/map.png)
 ![Corners](screenshots/corners.png)
 ![Delta](screenshots/delta.png)
 ![Grip](screenshots/grip.png)
 ![Stint](screenshots/stint.png)
+![Engine](screenshots/engine.png)
 
 Rules carried over from the tools: lap times are compared only within one track and one direction
 (both from GPS); AiM's own out and in laps never count; laps more than 3% off the day's best, and
 laps the GPS did not fully record, are left out of the ideal; throttle and braking are inferred
-from GPS speed (there is no throttle or brake channel); lean and grip are estimates from GPS too.
+from GPS speed on every view but Engine; lean and grip are estimates from GPS too.
 
 ## How it fits together
 
