@@ -42,7 +42,14 @@ Method
                    Hills shift it a little (uphill makes coasting read as light braking).
 Outputs (OUT_DIR): sections.csv, lap_sections.csv, corners.csv, corner_phases.csv,
                    corner_phases_all_laps.csv, summary.md, track_map.png, speed_trace.png,
-                   viewer.json (the same numbers for the pit lap viewer)
+                   viewer.json (the same numbers for the pit lap viewer, plus what its other
+                   views need: see scripts/lap_views.py)
+    delta trace  : for the viewer. Each lap's clock (seconds since the timing line) at every
+                   DELTA_STEP_M along the reference path, minus the best lap's clock at the same
+                   spot: positive = behind the best lap there. Given for the ideal lap (each
+                   section at the pace of the lap that was fastest through it) and for every lap
+                   in the same direction on the same bike that the GPS recorded fully and that
+                   stayed on the reference line, slower than 103% or not.
 """
 import argparse
 import contextlib
@@ -58,6 +65,7 @@ from scipy.signal import find_peaks, savgol_filter
 from libxrk import aim_xrk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lap_views  # noqa: E402
 import tracks  # noqa: E402
 
 SLOW_FACTOR = 1.03
@@ -605,6 +613,28 @@ def main():
     fig.savefig(os.path.join(a.out, "speed_trace.png"), dpi=150, facecolor=surf)
     plt.close(fig)
 
+    # laps whose times along the track can be trusted, fast enough for the ideal or not
+    def comparable(L):
+        return (L["dir"] == ref["dir"] and L["s"]["vehicle"] == ref["s"]["vehicle"] and not L["last"]
+                and L["gps_gap"] <= GPS_GAP_S and L["max_off"] <= MAX_OFFLINE_M and abs(L["closure"]) <= CLOSURE_S)
+
+    # time delta trace: every comparable lap's clock against the best lap's, along the reference path
+    curve = lambda L: (L["prog"], L["t"])
+    dgrid = lap_views.lap_grid(L_ref)
+    best_clock = lap_views.clock_at(curve(fast), dgrid)
+    pieces = lap_views.pieces_in_order([(sec["d0"], sec["d1"], sec["wrap"], k) for k, sec in enumerate(sections)], L_ref)
+    ideal_clock, ideal_total = lap_views.composite_clock(dgrid, pieces, {k: curve(L) for k, L in enumerate(ideal_from)})
+    if abs(ideal_total - ideal) > 0.01:
+        raise SystemExit(f"delta trace: the stitched ideal lap is {ideal_total:.3f} s but the ideal is {ideal:.3f} s")
+    comp = [L for L in rows if comparable(L)]
+    session_best = {id(min((L for L in comp if L["s"] is s_), key=lambda L: L["time"]))
+                    for s_ in sessions if any(L["s"] is s_ for L in comp)}
+    delta = {"step_m": lap_views.DELTA_STEP_M, "d": [round(float(x), 1) for x in dgrid],
+             "ideal_cs": lap_views.delta_cs(ideal_clock, best_clock),
+             "laps": [{"session": L["s"]["name"], "lap": L["num"], "time_s": round(L["time"], 3),
+                       "used": not L["why_out"], "session_best": id(L) in session_best,
+                       "cs": lap_views.delta_cs(lap_views.clock_at(curve(L), dgrid), best_clock)} for L in comp]}
+
     # viewer.json: the same map and trace numbers as the PNGs, for the pit lap viewer (viewer/)
     import json
     step = max(1, len(rd) // 600)
@@ -633,6 +663,7 @@ def main():
         "apexes": [{"label": tname[ci], "d": round(float(rd[p]), 1), "x": round(float(rx[p]), 1),
                     "y": round(float(ry[p]), 1), "side": apex_side[ci]} for ci, p in enumerate(pk)],
         "trace": {"d": r3(grid_d[::2]), "best_kph": r3(best_v[::2]), "ideal_kph": r3(comp_v[::2])},
+        "delta": delta,
     }, open(os.path.join(a.out, "viewer.json"), "w"), separators=(",", ":"))
 
     print("\n".join(lines))

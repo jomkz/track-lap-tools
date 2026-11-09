@@ -88,9 +88,12 @@ fields are described at the top of `scripts/tracks.py` and `scripts/xrk_chicane.
 | `scripts/track_add.py` | Make a `tracks/<id>/` folder from an analysed day |
 | `scripts/tracks.py` | Track definitions and matching a session to its track |
 | `scripts/track_common.py` | Shared loading, GPS alignment and turn lookup |
+| `scripts/lap_views.py` | Numbers for the viewer's extra views (time delta trace), as functions on arrays |
 | `tracks/<id>/` | One folder per known track: `track.json`, `turns.csv` and other reference files |
 
-`viewer.json` (written by `xrk_ideal_lap.py`) holds the track path, sections and speed traces for the viewer.
+`viewer.json` (written by `xrk_ideal_lap.py`) holds the track path, sections and speed traces for the viewer,
+and what its other views need, such as each lap's time delta to the best lap along the track
+(worked out in `scripts/lap_views.py`).
 
 ## Tests
 

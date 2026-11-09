@@ -12,8 +12,8 @@ What it does
        code as the cloud runs: lap table and direction, ideal lap, time lost by section, tire-wear
        signal, and the cost of a cone chicane where the track defines one. A day is analysed again
        when its files, the scripts or a track definition (../tracks/) change.
-    3. Serves three views of each day: session board, track map of time lost, corner compare.
-    4. Writes a small summary of each day and session (JSON and CSV, tens of KB) into
+    3. Serves views of each day: session board, track map of time lost, corner compare, time delta.
+    4. Writes a small summary of each day and session (JSON and CSV, about 150 KB a day) into
        "summary_folder", which can be a folder synced to Google Drive.
 
 Options
@@ -186,9 +186,12 @@ def day_bundle(folder, cfg, date_sessions=None):
         short = r["session"][r["session"].rfind("a_"):] if "a_" in r["session"] else r["session"]
         lap_rows.append({"session": short, "lap": int(r["lap"]), "type": r["type"], "direction": r["direction"],
                          "lap_s": num(r["lap_s"]), "clean": r["clean"] == "True"})
-    used_flags = {(r["session"], int(r["lap"])): r["used"] == "True" for r in lapsec}
-    for r in lap_rows:
-        r["used"] = used_flags.get((r["session"], r["lap"]), False)
+    placed = {(r["session"], int(r["lap"])): r for r in lapsec}
+    for r in lap_rows:      # what the ideal-lap step worked out for this lap along the track
+        p = placed.get((r["session"], r["lap"]))
+        r["used"] = bool(p) and p["used"] == "True"
+        r["why_out"] = p["why_out"] if p else ""
+        r["sec_s"] = [num(p[c]) for c in sec_cols] if p else None
     tire = [{"turn": r["turn"], "session": r["session"], "laps": int(r["laps"]),
              "min_kph": num(r["min_kph"]), "peak_lat_g": num(r["peak_lat_g"])}
             for r in read_csv(os.path.join(folder, "tire_check.csv"))]
@@ -208,7 +211,7 @@ def day_bundle(folder, cfg, date_sessions=None):
         "gap_s": round(v["best_lap"]["time_s"] - ideal, 3), "ideal_whole_corners_s": v["ideal_whole_corners_s"],
         "laps_used": v["laps_used"], "lap_length_m": v["lap_length_m"], "geometry_from": v["geometry_from"],
         "path": v["path"], "sections": v["sections"], "corners": v["corners"], "apexes": v["apexes"],
-        "trace": v["trace"], "sessions": out_sessions, "laps": lap_rows, "tire": tire,
+        "trace": v["trace"], "delta": v.get("delta"), "sessions": out_sessions, "laps": lap_rows, "tire": tire,
         "tire_flags": parse_tire_md(os.path.join(folder, "tire_check.md")),
         "chicane": parse_chicane_md(os.path.join(folder, "chicane.md")), "corner_phases": phases,
         "ramp": {"label": cfg["ramp_label"], "targets_min": targets},
@@ -418,7 +421,7 @@ class Processor:
 
 
 def write_summary(b, root):
-    """Small files for Drive: day.json (everything the viewer shows, ~60 KB), sessions.csv,
+    """Small files for Drive: day.json (everything the viewer shows, ~110 KB), sessions.csv,
     laps.csv and one <session>.json per session."""
     out = os.path.join(root, b["id"].replace("analysis_", ""))
     os.makedirs(out, exist_ok=True)
@@ -430,7 +433,8 @@ def write_summary(b, root):
         w.writeheader()
         w.writerows(b["sessions"])
     with open(os.path.join(out, "laps.csv"), "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=["session", "lap", "type", "direction", "lap_s", "clean", "used"])
+        w = csv.DictWriter(f, fieldnames=["session", "lap", "type", "direction", "lap_s", "clean", "used", "why_out"],
+                           extrasaction="ignore")
         w.writeheader()
         w.writerows(b["laps"])
     for s in b["sessions"]:

@@ -26,7 +26,7 @@ Options: `--folder PATH` (watch another folder), `--port N`, `--no-browser`, `--
 | Folder | What | Setting in `config.json` |
 |---|---|---|
 | `xrk/` | Where it looks for `.xrk` / `.xrz` files, including subfolders. Files dropped on the page are saved in `xrk/dropped/`. Point it at the folder Race Studio 3 saves to and new sessions show up on their own. Where a `.xrz` sits next to the `.xrk` of the same session, only the `.xrk` is read. | `xrk_folder` |
-| `summaries/<date>/` | Small results per day: `day.json` (everything the viewer shows), `sessions.csv`, `laps.csv`, one `<session>.json` per session. About 90 KB a day. Point this at a synced cloud folder (for example Google Drive for desktop) to get results there without uploading the large `.xrk` files. | `summary_folder` |
+| `summaries/<date>/` | Small results per day: `day.json` (everything the viewer shows), `sessions.csv`, `laps.csv`, one `<session>.json` per session. About 150 KB a day. Point this at a synced cloud folder (for example Google Drive for desktop) to get results there without uploading the large `.xrk` files. | `summary_folder` |
 | `data/` | Analysis cache (the same outputs `run_day.py` writes, plus logs). Safe to delete; it is rebuilt. | `data_folder` |
 
 `config.json` is created on first start. Relative paths are inside `viewer/`; absolute paths
@@ -39,11 +39,12 @@ what it is doing. Files still being copied are skipped until they stop changing.
 analysed again after the scripts or a track definition (`../tracks/`) change, for example after an
 update or after you edit a track's turn table.
 
-## The three views
+## The views
 
-Keys: `1` `2` `3` switch views, left and right arrows change day, `F` toggles full screen,
-up and down arrows pick a corner on view 3. Text sizes follow the screen width, so the same page
-reads on a laptop and a TV. The top bar names the day, the track, the bike and the direction.
+Keys: `1` to `4` switch views, left and right arrows change day, `F` toggles full screen, up and
+down arrows pick a corner on view 3 and a lap on view 4. Text sizes follow the screen width, so the
+same page reads on a laptop and a TV. The top bar names the day, the track, the bike and the
+direction, with the view tabs on the row below.
 
 1. **Sessions:** best lap, ideal lap (best time in every section), gap, the cost of a cone chicane
    where the track defines one (Harris Hill's turn 6, clockwise), tire signal; then each session's
@@ -57,8 +58,17 @@ reads on a laptop and a TV. The top bar names the day, the track, the bike and t
    brake points and slowest speeds, best lap against the fastest single run through it, and the
    tire signal (slowest mid-corner speed by session) for that corner's turns.
 
+4. **Delta:** seconds behind the best lap at every point of the track. The best lap is the zero
+   line; a line that climbs is losing time there and one that falls is gaining. It draws the ideal
+   lap (it falls where the best lap left time) and each session's best lap, and any other lap you
+   pick from the list on the right (click it, or step with the up and down keys; pick it again to
+   clear it). Under the chart, bars show what the picked lap lost or gained in each corner, or
+   what the ideal gains when no lap is picked. Every lap in the day's direction that the GPS
+   recorded fully can be picked, including laps too slow to count toward the ideal (greyed).
+
 ![Map](screenshots/map.png)
 ![Corners](screenshots/corners.png)
+![Delta](screenshots/delta.png)
 
 Rules carried over from the tools: lap times are compared only within one track and one direction
 (both from GPS); AiM's own out and in laps never count; laps more than 3% off the day's best, and
@@ -69,6 +79,6 @@ from GPS speed (there is no throttle or brake channel).
 
 `lapviewer.py` (standard library only) watches the folder, groups files by the date the logger
 recorded, and runs `../scripts/run_day.py` for each new or changed date into `data/analysis/`.
-`xrk_ideal_lap.py` writes `viewer.json` (track path, sections, speed traces) next to its PNGs; the
-server combines it with the CSVs the other scripts write and serves it to `static/` (plain HTML,
-CSS and SVG, no libraries or internet).
+`xrk_ideal_lap.py` writes `viewer.json` (track path, sections, speed traces, and each lap's time
+delta along the track) next to its PNGs; the server combines it with the CSVs the other scripts
+write and serves it to `static/` (plain HTML, CSS and SVG, no libraries or internet).
