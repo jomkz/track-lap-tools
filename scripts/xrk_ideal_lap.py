@@ -50,6 +50,13 @@ Outputs (OUT_DIR): sections.csv, lap_sections.csv, corners.csv, corner_phases.cs
                    section at the pace of the lap that was fastest through it) and for every lap
                    in the same direction on the same bike that the GPS recorded fully and that
                    stayed on the reference line, slower than 103% or not.
+    stint        : for the viewer, per session. Its full laps in this direction with the minute on
+                   track each ended, and whether each is clean (the lap table's rule, lap_rules.py).
+                   trend: a robust line through the clean laps (lap_views.robust_trend), given
+                   only from MIN_TREND_LAPS clean laps up. late_early: over the clean laps whose
+                   section times can be trusted, the mean of the last third minus the mean of the
+                   first third in every section (the lap table's fade, split by section), with
+                   totals for the brake-in parts, the drive-out parts and the unsplit corners.
 """
 import argparse
 import contextlib
@@ -65,6 +72,7 @@ from scipy.signal import find_peaks, savgol_filter
 from libxrk import aim_xrk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lap_rules  # noqa: E402
 import lap_views  # noqa: E402
 import tracks  # noqa: E402
 
@@ -307,7 +315,7 @@ def main():
         else:
             parts = (("in", (c["d0"], dm)), ("out", (dm, c["d1"])))
         for part, (a0, a1) in parts:
-            sections.append({"d0": a0, "d1": a1, "wrap": a1 < a0, "parent": c,
+            sections.append({"d0": a0, "d1": a1, "wrap": a1 < a0, "parent": c, "part": part or "whole",
                              "name": f"{c['name']} {part}".strip(), "side": c["side"]})
     for k, sec in enumerate(sections):
         sec["id"] = k + 1
@@ -635,6 +643,34 @@ def main():
                        "used": not L["why_out"], "session_best": id(L) in session_best,
                        "cs": lap_views.delta_cs(lap_views.clock_at(curve(L), dgrid), best_clock)} for L in comp]}
 
+    # stint view: each session's laps against time on track, a trend that one slow lap cannot tilt,
+    # and where the late laps lost time to the early ones, section by section
+    stint = []
+    for s_ in sessions:
+        mine = [L for L in rows if L["s"] is s_ and L["dir"] == ref["dir"] and L["s"]["vehicle"] == ref["s"]["vehicle"]]
+        if not mine:
+            continue
+        clean = lap_rules.clean_flags([L["time"] for L in rows if L["s"] is s_])      # over all its full laps, as the lap table does
+        clean = dict(zip((id(L) for L in rows if L["s"] is s_), clean))
+        end_min = lambda L: L["lap"]["end_time"] / 60000.0
+        cl = [L for L in mine if clean[id(L)]]
+        trend = lap_views.robust_trend([end_min(L) for L in cl], [L["time"] for L in cl])
+        placed = [L for L in cl if comparable(L)]       # clean laps whose section times can be trusted
+        k = lap_rules.third(len(placed))
+        diff = lap_views.late_minus_early([L["sec_t"] for L in placed], k)
+        stint.append({
+            "session": s_["name"],
+            "laps": [{"lap": L["num"], "end_min": round(end_min(L), 2), "time_s": round(L["time"], 3),
+                      "clean": bool(clean[id(L)]), "placed": bool(comparable(L))} for L in mine],
+            "trend": None if trend is None else {"s_per_min": round(trend["s_per_min"], 4),
+                                                 "at_0_s": round(trend["at_0_s"], 3), "n": trend["n"]},
+            "late_early": None if diff is None else {
+                "early": [L["num"] for L in placed[:k]], "late": [L["num"] for L in placed[-k:]],
+                "sec_s": [round(float(x), 3) for x in diff], "lap_s": round(float(diff.sum()), 3),
+                "in_s": round(float(sum(x for x, sec in zip(diff, sections) if sec["part"] == "in")), 3),
+                "out_s": round(float(sum(x for x, sec in zip(diff, sections) if sec["part"] == "out")), 3),
+                "whole_s": round(float(sum(x for x, sec in zip(diff, sections) if sec["part"] == "whole")), 3)}})
+
     # viewer.json: the same map and trace numbers as the PNGs, for the pit lap viewer (viewer/)
     import json
     step = max(1, len(rd) // 600)
@@ -649,7 +685,7 @@ def main():
         "laps_used": len(used), "lap_length_m": round(L_ref, 1),
         "path": {"d": r3(rd[::step]), "x": r3(rx[::step]), "y": r3(ry[::step]),
                  "lat": [round(float(v), 6) for v in rlat[::step]], "lon": [round(float(v), 6) for v in rlon[::step]]},
-        "sections": [{"id": sec["id"], "name": sec["name"], "side": sec["side"], "d0": round(sec["d0"], 1),
+        "sections": [{"id": sec["id"], "name": sec["name"], "part": sec["part"], "side": sec["side"], "d0": round(sec["d0"], 1),
                       "d1": round(sec["d1"], 1), "wrap": bool(sec["wrap"]), "corner": sec["parent"]["name"],
                       "best_s": round(float(ref_sec[k]), 3), "ideal_s": round(float(ideal_t[k]), 3),
                       "lost_s": round(float(lost[k]), 3),
@@ -663,7 +699,7 @@ def main():
         "apexes": [{"label": tname[ci], "d": round(float(rd[p]), 1), "x": round(float(rx[p]), 1),
                     "y": round(float(ry[p]), 1), "side": apex_side[ci]} for ci, p in enumerate(pk)],
         "trace": {"d": r3(grid_d[::2]), "best_kph": r3(best_v[::2]), "ideal_kph": r3(comp_v[::2])},
-        "delta": delta,
+        "delta": delta, "stint": {"min_trend_laps": lap_views.MIN_TREND_LAPS, "sessions": stint},
     }, open(os.path.join(a.out, "viewer.json"), "w"), separators=(",", ":"))
 
     print("\n".join(lines))

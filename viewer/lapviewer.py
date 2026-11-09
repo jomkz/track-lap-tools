@@ -12,7 +12,8 @@ What it does
        code as the cloud runs: lap table and direction, ideal lap, time lost by section, tire-wear
        signal, and the cost of a cone chicane where the track defines one. A day is analysed again
        when its files, the scripts or a track definition (../tracks/) change.
-    3. Serves views of each day: session board, track map of time lost, corner compare, time delta.
+    3. Serves views of each day: session board, track map of time lost, corner compare, time delta,
+       stint.
     4. Writes a small summary of each day and session (JSON and CSV, about 150 KB a day) into
        "summary_folder", which can be a folder synced to Google Drive.
 
@@ -211,7 +212,7 @@ def day_bundle(folder, cfg, date_sessions=None):
         "gap_s": round(v["best_lap"]["time_s"] - ideal, 3), "ideal_whole_corners_s": v["ideal_whole_corners_s"],
         "laps_used": v["laps_used"], "lap_length_m": v["lap_length_m"], "geometry_from": v["geometry_from"],
         "path": v["path"], "sections": v["sections"], "corners": v["corners"], "apexes": v["apexes"],
-        "trace": v["trace"], "delta": v.get("delta"), "sessions": out_sessions, "laps": lap_rows, "tire": tire,
+        "trace": v["trace"], "delta": v.get("delta"), "stint": v.get("stint"), "sessions": out_sessions, "laps": lap_rows, "tire": tire,
         "tire_flags": parse_tire_md(os.path.join(folder, "tire_check.md")),
         "chicane": parse_chicane_md(os.path.join(folder, "chicane.md")), "corner_phases": phases,
         "ramp": {"label": cfg["ramp_label"], "targets_min": targets},

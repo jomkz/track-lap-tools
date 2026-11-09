@@ -41,9 +41,8 @@ from datetime import datetime
 from libxrk import aim_xrk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import lap_rules  # noqa: E402
 import tracks  # noqa: E402
-
-SLOW_FACTOR = 1.07
 
 
 def fmt(sec):
@@ -90,14 +89,14 @@ def read_session(path):
     fixes = [(a, b) for a, b in zip(g_lat, g_lon) if a and b]
     track = tracks.match(st.median(a for a, _ in fixes), st.median(b for _, b in fixes)) if fixes else None
     full = [(l["end_time"] - l["start_time"]) / 1000 for l in laps if l["lap_type"] == "full"]
-    med = st.median(full) if full else None
+    clean_of = iter(lap_rules.clean_flags(full))
     rows = []
     elapsed = 0.0
     for l in laps:
         t = (l["end_time"] - l["start_time"]) / 1000
         elapsed = l["end_time"] / 1000
         kind = l["lap_type"]
-        clean = kind == "full" and med is not None and t <= med * SLOW_FACTOR
+        clean = kind == "full" and next(clean_of)
         d = lap_direction(g_times, g_lat, g_lon, l["start_time"], l["end_time"]) if kind == "full" else ""
         rows.append({
             "lap": l["num"], "type": kind, "direction": d, "lap_s": round(t, 3), "lap_time": fmt(t),
@@ -109,7 +108,7 @@ def read_session(path):
     dirs = [r["direction"] for r in rows if r["direction"]]
     direction = max(set(dirs), key=dirs.count) if dirs else ""
     c = [r["lap_s"] for r in rows if r["clean"]]
-    n3 = max(1, len(c) // 3)
+    fade = lap_rules.fade(c)
     summary = {
         "session": os.path.splitext(os.path.basename(path))[0],
         "date": dt.strftime("%Y-%m-%d") if dt else md.get("Log Date"),
@@ -124,7 +123,7 @@ def read_session(path):
         "std_dev_s": round(st.stdev(c), 2) if len(c) > 1 else "",
         "spread_s": round(max(c) - best, 2) if c else "",
         "within_1pct_of_best": sum(1 for x in c if x <= best * 1.01) if c else 0,
-        "fade_s": round(st.mean(c[-n3:]) - st.mean(c[:n3]), 2) if len(c) >= 3 else "",
+        "fade_s": round(fade, 2) if fade is not None else "",
         "best_lap_no": next((r["lap"] for r in rows if r["type"] == "full" and r["lap_s"] == best), ""),
     }
     vd = summary["venue_direction"]
