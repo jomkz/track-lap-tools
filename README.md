@@ -65,6 +65,20 @@ needs to be within about 100 m of the apex. Track folders hold no lap data and c
 cross-check against the GPS direction) and temporary cone chicanes to cost out (`chicanes`). The
 fields are described at the top of `scripts/tracks.py` and `scripts/xrk_chicane.py`.
 
+## Bikes and engine data
+
+Most of the tools need only GPS. A log that also carries engine channels from the bike's ECU
+(engine speed, throttle, brake, gear) gets the viewer's Engine view. The channels are found by name
+or by the function the logger gives them, and one that is in the log but never moves is reported
+as flat and left out.
+
+When the ECU sends revs but no gear, gear can be worked out from revs and GPS speed, given the
+bike's gearbox ratios. `bikes/<id>.json` holds them, matched to a log by the vehicle name set in
+the logger; `bikes/yamaha-yzf-r7.json` is included. Only the ratios between the gears matter, so a
+change of sprockets or tyre needs no edit. Without a bike file no gear is shown: guessing the
+gearbox from the data gave different gears on different days. The fields are described at the top
+of `scripts/bikes.py`.
+
 ## Rules the tools follow
 
 - Lap times are compared only within one track and one direction. Both come from the GPS path, not the AiM track name.
@@ -73,7 +87,8 @@ fields are described at the top of `scripts/tracks.py` and `scripts/xrk_chicane.
   lap's pieces don't add up to its lap time) keeps its lap time in the lap table but is left out of
   everything worked out along the track. `summary.md` lists each one with the reason.
 - The first session is a warm-up; read the day from session two on.
-- Throttle and braking are inferred from GPS speed and g. There is no throttle, brake or RPM channel.
+- Throttle and braking are inferred from GPS speed and g everywhere except the viewer's Engine view, which
+  uses the ECU's channels when a log has them.
 
 ## Scripts
 
@@ -88,8 +103,10 @@ fields are described at the top of `scripts/tracks.py` and `scripts/xrk_chicane.
 | `scripts/track_add.py` | Make a `tracks/<id>/` folder from an analysed day |
 | `scripts/tracks.py` | Track definitions and matching a session to its track |
 | `scripts/track_common.py` | Shared loading, GPS alignment and turn lookup |
-| `scripts/lap_views.py` | Numbers for the viewer's extra views (time delta trace, stint trend, late against early, lean and the grip circle), as functions on arrays |
+| `scripts/lap_views.py` | Numbers for the viewer's extra views (time delta trace, stint trend, late against early, lean and the grip circle, engine channels and gear), as functions on arrays |
 | `scripts/lap_rules.py` | What a clean lap and fade mean, shared by the scripts |
+| `scripts/bikes.py` | Bike definitions and matching a log to its bike |
+| `bikes/<id>.json` | One file per known bike: its gearbox ratios |
 | `tracks/<id>/` | One folder per known track: `track.json`, `turns.csv` and other reference files |
 
 `viewer.json` (written by `xrk_ideal_lap.py`) holds the track path, sections and speed traces for the viewer,

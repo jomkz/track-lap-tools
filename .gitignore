@@ -9,9 +9,10 @@ output/
 *.json
 !viewer/screenshots/*.png
 
-# Track definitions are reference data, not lap data: they are kept
+# Track and bike definitions are reference data, not lap data: they are kept
 !tracks/*/*.json
 !tracks/*/*.csv
+!bikes/*.json
 
 # Viewer's local folders and settings
 viewer/config.json

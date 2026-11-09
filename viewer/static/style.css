@@ -141,6 +141,19 @@ table.lean { width: 100%; border-collapse: collapse; font-size: .88rem; }
 .lean tbody tr.on td { background: var(--surface-2); }
 .lean tbody tr:hover td { background: var(--surface-2); }
 
+/* engine view */
+.chans { flex: none; display: flex; flex-wrap: wrap; gap: .2rem 1.2rem; font-size: .8rem; padding: .45rem 1rem; }
+.chans .ch.off { color: var(--text-muted); }
+.chans .ch.ok b, .chans .ch.warn b { color: var(--text-primary); }
+.chans .ch { color: var(--text-secondary); }
+.chart-title { margin: .3rem 0 0; }
+.engside { overflow: hidden; gap: .3rem; }
+.chart.gearmap { flex: 1 1 42%; min-height: 8rem; }
+.engtable { flex: 1 1 58%; min-height: 0; overflow: auto; }
+table.eng { font-size: .8rem; }
+.eng tr.alt td { color: var(--text-muted); border-bottom-color: var(--line); }
+.eng td.sub2 { font-size: .7rem; padding-left: 1.2rem; }
+
 /* stint view */
 .stint-top { flex: 0 0 40%; min-height: 12rem; }
 .stint-head { display: flex; align-items: center; gap: .4rem 1rem; flex-wrap: wrap; margin-bottom: .3rem; }

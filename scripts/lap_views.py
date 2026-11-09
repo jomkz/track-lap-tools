@@ -221,3 +221,192 @@ def gyro_agreement(lean_rate, roll, yaw, pitch):
         return None
     r2 = 1.0 - float(np.sum((y - A @ coef) ** 2)) / ss
     return {"r": float(np.sqrt(max(0.0, r2))), "n": int(ok.sum())}
+
+
+# ---------------------------------------------------------------- engine view (ECU channels)
+
+ROLE_NAMES = {      # channel names, lower case with only letters and digits, as loggers and ECUs tend to spell them
+    "rpm": ("rpm", "enginerpm", "enginespeed", "revs", "erpm"),
+    "throttle": ("tps", "throttle", "throttleposition", "throttlepos", "throttleangle", "aps", "pps", "gas", "accelerator"),
+    "brake": ("brake", "brakepress", "brakepressure", "brakepos", "brakeposition", "fbrake", "frontbrake", "brakef",
+              "fbrakepress", "frontbrakepress", "brakesw", "brakeswitch"),
+    "gear": ("gear", "gearposition", "gearpos", "calcgear"),
+}
+ROLE_FUNCTIONS = {"rpm": ("engine rpm",), "throttle": ("throttle",), "brake": ("brake",), "gear": ("gear",)}
+NOT_A_ROLE = ("temp", "volt", "diff", "time", "lambda", "fuel")
+TYRE_CROWN = 0.28       # how much the rear tyre's rolling radius shrinks with lean: crown radius over wheel radius
+GEAR_MIN_KPH = 18.0
+GEAR_MIN_RPM = 2000.0
+GEAR_TOL = 0.06         # a sample belongs to a gear when its ratio is within this (6%) of that gear's
+GEAR_FIT_TOL = 0.04     # ...and the fit of the gearbox to the data counts samples within this
+GEAR_FIT_MIN = 0.75     # the gearbox fits when at least this share of the steady samples sit on a gear
+GEAR_FIT_MARGIN = 0.15  # ...and no other line-up of the gears comes within this of it
+GEAR_LAGS = (0.1, 0.0, -0.1, -0.2, -0.3, -0.4)      # seconds from GPS speed to the revs that go with it (negative: speed trails)
+GEAR_CROWNS = (0.20, 0.28, 0.36, 0.44, 0.52, 0.60)  # values tried for the tyre's shrink with lean
+FULL_THROTTLE = 95.0    # percent of the throttle range
+THROTTLE_ON = 10.0
+BRAKE_ON = 10.0
+
+
+def channel_roles(meta):
+    """Which logged channel is engine speed, throttle, brake and gear. meta: {channel name:
+    {"units": .., "function": ..}} as the logger describes them. A channel is taken for a role by
+    its name, or by what the logger says its function is. Returns {role: name or None}."""
+    out = {role: None for role in ROLE_NAMES}
+    for name, m in meta.items():
+        key = "".join(ch for ch in name.lower() if ch.isalnum())
+        if any(bad in key for bad in NOT_A_ROLE):
+            continue
+        func = (m.get("function") or "").lower()
+        for role in ROLE_NAMES:
+            if out[role] is None and (key in ROLE_NAMES[role] or any(f in func for f in ROLE_FUNCTIONS[role])):
+                out[role] = name
+                break
+    return out
+
+
+def channel_state(values, role):
+    """("ok", "") when a channel carries a signal, else ("flat", why): a channel that is in the log
+    but never moves (not wired, or not sent by the ECU) must not be shown as data."""
+    v = np.asarray(values, float)
+    v = v[np.isfinite(v)]
+    if len(v) < 50:
+        return "flat", "almost no samples"
+    if float(v.max() - v.min()) <= 1e-9:
+        return "flat", f"always {float(v[0]):.3g}"
+    if role == "rpm" and np.percentile(v, 99) < 1500:
+        return "flat", f"never above {np.percentile(v, 99):.0f}"
+    return "ok", ""
+
+
+def percent_of_range(values):
+    """A throttle or brake channel as 0 to 100 percent of the range it covered that day (its 1st to
+    99th percentile), whatever its unit: ECUs send percent, volts, counts or a switch."""
+    v = np.asarray(values, float)
+    lo, hi = np.nanpercentile(v, 1), np.nanpercentile(v, 99)
+    return np.clip((v - lo) / (hi - lo), 0.0, 1.0) * 100.0
+
+
+def upright_ratio(rpm, speed_ms, lat_g, crown=TYRE_CROWN):
+    """Engine revs per km/h as it would read with the bike upright. Leaned over, the rear tyre rolls
+    on a smaller radius, so the same gear shows more revs per km/h (8 to 9% more at 45 degrees);
+    without this correction a leaned-over gear reads as the gear below. crown is how strong the
+    effect is: the tyre's crown radius over the wheel's radius."""
+    lean = np.arctan(np.abs(np.asarray(lat_g, float)))
+    return np.asarray(rpm, float) / (np.asarray(speed_ms, float) * 3.6) * (1.0 - crown * (1.0 - np.cos(lean)))
+
+
+def _in_gear_ratio(sess, lag, crown):
+    """log(upright revs per km/h) for one session with the revs read `lag` seconds away from the GPS
+    speed; where it is valid (ok) and where it is steady enough to be in gear with the clutch out."""
+    t, v, lat, t_rpm, rpm_raw = sess
+    rpm = np.interp(t + lag, t_rpm, rpm_raw)
+    ok = (v * 3.6 > GEAR_MIN_KPH) & (rpm > GEAR_MIN_RPM) & np.isfinite(rpm)
+    lr = np.zeros(len(t))
+    lr[ok] = np.log(upright_ratio(rpm[ok], v[ok], lat[ok], crown))
+    win = max(3, int(round(0.5 / float(np.median(np.diff(t))))) | 1)
+    box = np.ones(win) / win
+    calm = np.convolve(lr, box, mode="same")        # half-second average: rev counters step in coarse units
+    whole = np.convolve(ok.astype(float), box, mode="same") > 0.999
+    return calm, ok, ok & whole & (np.abs(np.gradient(calm, t)) < 0.04)      # steady: under 4% a second
+
+
+def gears_from_ratios(sessions, gear_ratios):
+    """Gear from engine revs and GPS speed, for logs with no gear channel, given the bike's gearbox
+    ratios (lowest gear first). sessions: one (t, speed m/s, cornering g, revs' own times, revs)
+    per session of the day.
+
+    In gear g the revs per km/h are scale x gear_ratios[g], where the one unknown, scale, holds
+    the primary drive, the sprockets and the tyre. It is fitted as the value that puts the most
+    steady, in-gear samples on a gear. Because the steps between gears are all different, only one
+    scale lines the samples up, so the gears come out with their real numbers even on a day when
+    1st or 6th was never used. Two things about the day are fitted with it, from a few set values
+    each: how far the GPS speed trails the ECU's revs (GEAR_LAGS), and how much the tyre's rolling
+    radius shrinks with lean (GEAR_CROWNS). Without them a third of the samples on real logs
+    fall between gears.
+
+    Returns {"rpm_per_kph": per gear, "gears": a gear number per sample for each session (0 where
+    none fits, as in a shift or with the clutch in), "fit": the share of steady samples on a gear,
+    "lag_s", "tyre_crown"}, or None when the revs do not fit this gearbox: under GEAR_FIT_MIN of
+    the steady samples on a gear, or another line-up (every gear read one higher or lower) within
+    GEAR_FIT_MARGIN of it."""
+    from scipy.signal import medfilt
+    ref = np.log(np.asarray(gear_ratios, float))
+    if len(ref) < 2 or not sessions:
+        return None
+    edges = np.arange(np.log(10.0), np.log(800.0), 0.002)
+    scales = np.arange(edges[0] - ref.min() + GEAR_FIT_TOL, edges[-1] - ref.max() - GEAR_FIT_TOL, 0.002)
+    centre_bin = np.round((scales[:, None] + ref[None, :] - edges[0]) / 0.002).astype(int)
+
+    def on_gear(cum, n, tol):
+        """For every scale: the share of the samples within tol of a gear."""
+        w = int(round(tol / 0.002))
+        lo, hi = np.clip(centre_bin - w, 0, len(cum) - 1), np.clip(centre_bin + w + 1, 0, len(cum) - 1)
+        return (cum[hi] - cum[lo]).sum(axis=1) / n
+
+    half = int(round(GEAR_FIT_TOL / 0.002))
+    peak = 1.0 - np.abs(np.arange(-half, half + 1)) / (half + 1.0)      # 1 on the gear, falling to 0 at the tolerance
+    best = None
+    for lag in GEAR_LAGS:
+        for crown in GEAR_CROWNS:
+            parts = [_in_gear_ratio(s, lag, crown) for s in sessions]
+            x = np.concatenate([calm[steady] for calm, _, steady in parts])
+            if len(x) < 300:
+                continue
+            hist = np.histogram(x, edges)[0]
+            cum = np.concatenate([[0], np.cumsum(hist)])
+            # the lag and the tyre figure are the pair that gathers the samples most tightly on the gears:
+            # each sample counts for more the nearer it sits to a gear, so a spread-out fit loses to a sharp one
+            near = np.convolve(hist, peak, mode="same")
+            tight = float(near[np.clip(centre_bin, 0, len(near) - 1)].sum(axis=1).max()) / len(x)
+            if best is None or tight > best["tight"]:
+                best = {"tight": tight, "cum": cum, "n": len(x), "lag": lag, "crown": crown, "parts": parts}
+    if best is None:
+        return None
+    score = on_gear(best["cum"], best["n"], GEAR_FIT_TOL)
+    top = float(score.max())
+    fit = float(np.mean(scales[score >= top - 0.01]))               # the middle of the scales that fit best
+    # a different line-up of the gears (every gear read one up or down) is at least a gear step away
+    elsewhere = np.abs(scales - fit) > 2 * GEAR_FIT_TOL + 0.02
+    other = float(score[elsewhere].max()) if elsewhere.any() else 0.0
+    if top < GEAR_FIT_MIN or other > top - GEAR_FIT_MARGIN:
+        return None
+    best.update(top=top, fit=fit)
+    centres = best["fit"] + ref
+    gears = []
+    for (calm, ok, _), s in zip(best["parts"], sessions):
+        gap = np.abs(calm[ok][:, None] - centres[None, :])
+        gear = np.zeros(len(calm), int)
+        gear[ok] = np.where(gap.min(axis=1) <= GEAR_TOL, gap.argmin(axis=1) + 1, 0)
+        win = max(3, int(round(0.4 / float(np.median(np.diff(s[0]))))) | 1)
+        gears.append(medfilt(gear.astype(float), win).astype(int))          # no flicker between samples
+    return {"rpm_per_kph": [float(c) for c in np.exp(centres)], "gears": gears, "fit": best["top"],
+            "lag_s": best["lag"], "tyre_crown": best["crown"]}
+
+
+def throttle_pickup_m(d, throttle_pct, apex_d):
+    """How far after the slowest point (metres; negative = before it) the throttle comes back on:
+    the first place from 60 m before the apex where it is over THROTTLE_ON percent and stays over
+    for the next 20 m. None if it never does in the stretch given."""
+    d, th = np.asarray(d, float), np.asarray(throttle_pct, float)
+    on = th > THROTTLE_ON
+    for i in np.flatnonzero((d >= apex_d - 60.0) & on):
+        ahead = (d >= d[i]) & (d <= d[i] + 20.0)
+        if on[ahead].all():
+            return float(d[i] - apex_d)
+    return None
+
+
+def coast_seconds(t, throttle_pct, brake_pct=None):
+    """Seconds with the throttle shut and, when there is a brake channel, the brake off too."""
+    t, th = np.asarray(t, float), np.asarray(throttle_pct, float)
+    idle = th < THROTTLE_ON
+    if brake_pct is not None:
+        idle &= np.asarray(brake_pct, float) < BRAKE_ON
+    return float(np.sum(np.diff(t)[idle[:-1]])) if len(t) > 1 else 0.0
+
+
+def full_throttle_pct(throttle_pct):
+    """Share of the samples (so of the time, at a steady sample rate) at full throttle."""
+    th = np.asarray(throttle_pct, float)
+    return float(100.0 * np.mean(th >= FULL_THROTTLE)) if len(th) else 0.0

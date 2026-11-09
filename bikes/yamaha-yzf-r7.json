@@ -1,0 +1,6 @@
+{
+  "name": "Yamaha YZF-R7",
+  "match": ["yzf-r7", "yzf r7"],
+  "gear_ratios": [2.846, 2.125, 1.632, 1.300, 1.091, 0.964],
+  "note": "Gearbox ratios, 1st to 6th, from Yamaha's specification for the 689 cc CP2 engine (YZF-R7, MT-07). Only the steps between gears matter here, so a change of sprockets or tyre needs no edit."
+}

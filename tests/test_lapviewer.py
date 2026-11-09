@@ -31,8 +31,11 @@ class ToolsSignature(unittest.TestCase):
             os.makedirs(tracks)
             open(os.path.join(scripts, "tool.py"), "w").write("x = 1\n")
             open(os.path.join(tracks, "turns.csv"), "w").write("turn,name,lat,lon\n1,,30.0,-97.0\n")
-            keep = lapviewer.SCRIPTS, lapviewer.TRACKS
-            lapviewer.SCRIPTS, lapviewer.TRACKS = scripts, os.path.join(d, "tracks")
+            bikes = os.path.join(d, "bikes")
+            os.makedirs(bikes)
+            open(os.path.join(bikes, "some-bike.json"), "w").write('{"name": "Some bike"}')
+            keep = lapviewer.SCRIPTS, lapviewer.TRACKS, lapviewer.BIKES
+            lapviewer.SCRIPTS, lapviewer.TRACKS, lapviewer.BIKES = scripts, os.path.join(d, "tracks"), bikes
             try:
                 first = lapviewer.tools_sig()
                 self.assertEqual(first, lapviewer.tools_sig())
@@ -40,9 +43,12 @@ class ToolsSignature(unittest.TestCase):
                 second = lapviewer.tools_sig()
                 self.assertNotEqual(first, second)
                 open(os.path.join(scripts, "tool.py"), "w").write("x = 2\n")
-                self.assertNotEqual(second, lapviewer.tools_sig())
+                third = lapviewer.tools_sig()
+                self.assertNotEqual(second, third)
+                open(os.path.join(bikes, "some-bike.json"), "w").write('{"name": "Some bike", "gear_ratios": [2.8, 2.1]}')
+                self.assertNotEqual(third, lapviewer.tools_sig())
             finally:
-                lapviewer.SCRIPTS, lapviewer.TRACKS = keep
+                lapviewer.SCRIPTS, lapviewer.TRACKS, lapviewer.BIKES = keep
 
 
 class ChicaneSummary(unittest.TestCase):
