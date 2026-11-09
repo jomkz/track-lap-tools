@@ -178,5 +178,165 @@ class Rules(unittest.TestCase):
         self.assertEqual([self.r.third(n) for n in (0, 2, 3, 5, 6, 12)], [0, 0, 1, 1, 2, 4])
 
 
+class Lean(unittest.TestCase):
+    def test_lean_from_cornering_force(self):
+        # 30 m/s round a 90 m radius is 10 m/s2, 1.0197 g: just over 45 degrees
+        self.assertAlmostEqual(float(lv.lean_deg(30.0 ** 2 / 90.0 / 9.80665)), 45.56, places=2)
+        self.assertAlmostEqual(float(lv.lean_deg(0.0)), 0.0)
+        self.assertAlmostEqual(float(lv.lean_deg(-1.0)), 45.0)      # left or right, the angle is the same
+        self.assertAlmostEqual(float(lv.lean_deg(1.2)), 50.19, places=2)
+
+    def test_held_peak_ignores_a_spike_and_keeps_a_plateau(self):
+        x = np.r_[np.linspace(0, 1.0, 20), np.full(30, 1.0), np.linspace(1.0, 0, 20)]
+        self.assertAlmostEqual(lv.held_peak(x, 12), 1.0)
+        spiked = x.copy()
+        spiked[35:38] = 2.5                                         # three samples of GPS glitch
+        self.assertAlmostEqual(lv.held_peak(spiked, 12), 1.0)
+        self.assertAlmostEqual(float(spiked.max()), 2.5)            # what a plain maximum would have said
+        held = x.copy()
+        held[30:45] = 1.3                                           # a real, held, deeper lean
+        self.assertAlmostEqual(lv.held_peak(held, 12), 1.3)
+
+    def test_held_peak_needs_enough_samples(self):
+        self.assertTrue(np.isnan(lv.held_peak(np.ones(5), 12)))
+        self.assertAlmostEqual(lv.held_peak(np.ones(12), 12), 1.0)
+        # a level held one sample short of the window does not count
+        x = np.zeros(40)
+        x[10:21] = 1.0
+        self.assertAlmostEqual(lv.held_peak(x, 12), 0.0)
+        x[10:22] = 1.0
+        self.assertAlmostEqual(lv.held_peak(x, 12), 1.0)
+
+    def test_despike_removes_short_spikes_only(self):
+        x = np.r_[np.zeros(20), np.full(20, 1.0), np.zeros(20)]
+        spiked = x.copy()
+        spiked[5] = 9.0
+        spiked[30:32] = -9.0
+        np.testing.assert_allclose(lv.despike(spiked), x)
+
+
+class GripCircle(unittest.TestCase):
+    def circle(self, radius, n=3600):
+        th = np.linspace(0, 2 * np.pi, n, endpoint=False)
+        return radius * np.cos(th), radius * np.sin(th)
+
+    def round_env(self, radius=1.0):
+        return lv.envelope([self.circle(radius)] * 3, 5)
+
+    def test_outline_of_a_circle_is_its_radius(self):
+        env = self.round_env(1.1)
+        self.assertEqual(len(env), 24)
+        np.testing.assert_allclose(env, 1.1, atol=1e-6)
+
+    def test_outline_follows_the_shape(self):
+        # plenty of cornering grip, hard braking, little acceleration: the outline is not round
+        rng = np.random.default_rng(3)
+        laps = []
+        for _ in range(10):
+            th = rng.uniform(0, 2 * np.pi, 4000)
+            limit = np.where(np.sin(th) > 0.5, 0.4, 1.0)            # weak in the acceleration direction
+            r = limit * rng.uniform(0, 1, len(th))
+            laps.append((r * np.cos(th), r * np.sin(th)))
+        env = lv.envelope(laps, 5)
+        self.assertAlmostEqual(env[0], 0.99, delta=0.02)            # 0 deg: right-hand cornering
+        self.assertAlmostEqual(env[6], 0.40, delta=0.02)            # 90 deg: acceleration
+        self.assertAlmostEqual(env[18], 0.99, delta=0.02)           # 270 deg: braking
+
+    def test_directions_with_no_samples_are_filled_from_their_neighbours(self):
+        th = np.radians(np.r_[np.full(100, 0.0), np.full(100, 180.0)])      # samples in two directions only
+        env = lv.envelope([(np.cos(th), np.sin(th))], 5)
+        self.assertFalse(np.isnan(env).any())
+        np.testing.assert_allclose(env, 1.0, atol=1e-9)
+        self.assertTrue(np.isnan(lv.envelope([(np.zeros(10), np.ones(10))], 5)).all())      # too few anywhere
+        self.assertTrue(np.isnan(lv.envelope([], 5)).all())
+
+    def test_one_wild_sample_does_not_set_the_outline(self):
+        lat, lon = self.circle(1.0)
+        lat = lat.copy()
+        lat[0] = 4.0
+        self.assertLess(lv.envelope([(lat, lon)], 5)[0], 1.01)
+
+    def test_one_bad_lap_does_not_set_the_outline(self):
+        good, bad = self.circle(1.0), self.circle(2.0)             # a whole lap of doubled readings
+        env = lv.envelope([good] * 9 + [bad], 5)
+        np.testing.assert_allclose(env, 1.0, atol=1e-6)
+
+    def test_more_laps_do_not_push_the_outline_out(self):
+        rng = np.random.default_rng(11)
+        def lap():
+            th = np.linspace(0, 2 * np.pi, 2400, endpoint=False)
+            r = 1.0 + rng.normal(0, 0.05, len(th))                  # the same rider, with noise
+            return r * np.cos(th), r * np.sin(th)
+        few, many = lv.envelope([lap() for _ in range(5)], 5), lv.envelope([lap() for _ in range(60)], 5)
+        self.assertLess(abs(float(np.mean(many) - np.mean(few))), 0.02)
+        pooled_max = max(float(np.hypot(*lap()).max()) for _ in range(60))
+        self.assertGreater(pooled_max, float(np.mean(many)) + 0.05)     # what the day's largest sample would say
+
+    def test_coasting_does_not_lower_the_outline(self):
+        # hard straight-line braking for 2 s of the lap, then ten minutes of coasting in the same direction
+        lon = np.r_[np.full(50, -0.9), np.full(15000, -0.05)]
+        env = lv.envelope([(np.zeros(len(lon)), lon)], 5)
+        self.assertAlmostEqual(env[18], 0.9, delta=0.01)
+        self.assertLess(float(np.percentile(np.abs(lon), 98)), 0.1)     # what a percentile of samples would have said
+
+    def test_limit_share(self):
+        env = self.round_env(1.0)
+        lat, lon = self.circle(1.0)
+        np.testing.assert_allclose(lv.limit_share(0.5 * lat, 0.5 * lon, env), 0.5, atol=1e-6)
+        np.testing.assert_allclose(lv.limit_share(np.array([0.0]), np.array([-0.8]), env), 0.8, atol=1e-6)
+
+    def corner(self, blend):
+        """Brake at 0.9 g, then lean to 1.0 g. blend=True trades one for the other round the circle;
+        blend=False lets the brake go first, then leans."""
+        n = 40
+        if blend:
+            th = np.linspace(-np.pi / 2, 0, n)
+            lat, lon = np.cos(th), 0.9 * np.sin(th)
+        else:
+            lat = np.r_[np.zeros(n // 2), np.linspace(0, 1.0, n // 2)]
+            lon = np.r_[np.linspace(-0.9, 0, n // 2), np.zeros(n // 2)]
+        return np.r_[lat, np.full(20, 1.0)], np.r_[lon, np.zeros(20)]
+
+    def test_trail_braking_shows_as_a_high_entry_blend(self):
+        env = self.round_env()
+        blended = lv.corner_grip(*self.corner(True), env, 0.04)
+        released = lv.corner_grip(*self.corner(False), env, 0.04)
+        self.assertGreater(blended["entry_blend_pct"], 85)
+        self.assertLess(released["entry_blend_pct"], 15)            # passed through no braking and no lean
+        self.assertGreater(blended["near_limit_pct"], released["near_limit_pct"])
+        self.assertAlmostEqual(blended["peak_brake_g"], 0.9, delta=0.01)
+        self.assertAlmostEqual(blended["peak_lat_g"], 1.0, delta=0.01)
+
+    def test_corner_with_no_brake_zone_has_no_entry_blend(self):
+        env = self.round_env()
+        got = lv.corner_grip(np.r_[np.linspace(0, 1, 20), np.ones(20)], np.full(40, -0.1), env, 0.04)
+        self.assertIsNone(got["entry_blend_pct"])
+        self.assertIsNone(lv.corner_grip(np.ones(3), np.zeros(3), env, 0.04))      # too few samples
+
+
+class Gyro(unittest.TestCase):
+    def test_tilted_gyro_that_follows_the_lean_agrees(self):
+        rng = np.random.default_rng(5)
+        t = np.arange(0, 120, 0.04)
+        lean_rate = 20 * np.sin(t / 3.0) + 8 * np.sin(t / 0.7)
+        yaw_of_track = 15 * np.cos(t / 5.0)
+        tilt = np.radians(42)                                       # the logger sits tilted on the bike
+        roll = lean_rate * np.cos(tilt) + yaw_of_track * np.sin(tilt) + rng.normal(0, 1, len(t)) + 1.5
+        yaw = -lean_rate * np.sin(tilt) + yaw_of_track * np.cos(tilt) + rng.normal(0, 1, len(t))
+        got = lv.gyro_agreement(lean_rate, roll, yaw, rng.normal(0, 1, len(t)))
+        self.assertGreater(got["r"], 0.97)
+        self.assertEqual(got["n"], len(t))
+
+    def test_unrelated_gyro_does_not_agree(self):
+        rng = np.random.default_rng(6)
+        t = np.arange(0, 120, 0.04)
+        got = lv.gyro_agreement(20 * np.sin(t / 3.0), *(rng.normal(0, 5, len(t)) for _ in range(3)))
+        self.assertLess(got["r"], 0.1)
+
+    def test_too_little_data(self):
+        self.assertIsNone(lv.gyro_agreement(np.ones(100), np.ones(100), np.ones(100), np.ones(100)))
+        self.assertIsNone(lv.gyro_agreement(np.zeros(1000), np.zeros(1000), np.zeros(1000), np.zeros(1000)))
+
+
 if __name__ == "__main__":
     unittest.main()

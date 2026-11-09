@@ -123,6 +123,24 @@ svg .sec { fill: var(--text-secondary); }
 .lapchips .slow { color: var(--text-muted); }
 .lapchips .tag { color: var(--text-secondary); font-size: .65rem; text-transform: uppercase; letter-spacing: .03em; }
 
+/* grip view */
+.split.grip { grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); }
+.gripcap { margin: .3rem 0 0; font-size: .9rem; }
+.legend .dot { display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; vertical-align: middle; margin-right: .3rem; }
+.gripside { overflow: auto; }
+table.lean { width: 100%; border-collapse: collapse; font-size: .88rem; }
+.lean td.seq, .lean td.lbl { white-space: nowrap; }
+.lean .arr { color: var(--text-muted); margin: 0 .3rem; }
+.lean th { text-align: left; color: var(--text-secondary); font-weight: 600; font-size: .8rem; padding: .2rem .5rem;
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--surface-1); }
+.lean td { padding: .16rem .4rem; border-bottom: 1px solid var(--grid); vertical-align: baseline; }
+.lean th.num, .lean td.num { text-align: right; white-space: nowrap; }
+.lean td.big { font-size: 1.05rem; font-weight: 700; }
+.lean .sub { color: var(--text-muted); font-size: .68rem; margin-left: .35rem; }
+.lean tbody tr { cursor: pointer; }
+.lean tbody tr.on td { background: var(--surface-2); }
+.lean tbody tr:hover td { background: var(--surface-2); }
+
 /* stint view */
 .stint-top { flex: 0 0 40%; min-height: 12rem; }
 .stint-head { display: flex; align-items: center; gap: .4rem 1rem; flex-wrap: wrap; margin-bottom: .3rem; }
