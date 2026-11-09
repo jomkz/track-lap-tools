@@ -123,6 +123,36 @@ svg .sec { fill: var(--text-secondary); }
 .lapchips .slow { color: var(--text-muted); }
 .lapchips .tag { color: var(--text-secondary); font-size: .65rem; text-transform: uppercase; letter-spacing: .03em; }
 
+/* stint view */
+.stint-top { flex: 0 0 40%; min-height: 12rem; }
+.stint-head { display: flex; align-items: center; gap: .4rem 1rem; flex-wrap: wrap; margin-bottom: .3rem; }
+.stint-head h2 { margin: 0; }
+.stint-head .ghost { margin-left: auto; font-size: .8rem; white-space: nowrap; }
+.stint-pick button { font-size: .85rem; padding: .15rem .55rem; }
+.stint-pick button .note { font-size: .75rem; }
+.stint-pick .sw { display: inline-block; width: 1.2rem; height: .3rem; border-radius: .15rem; align-self: center; }
+.stint-bot { flex: 1 1 0; display: flex; flex-direction: column; min-height: 12rem; }
+.stint-sum { margin: 0 0 .4rem; font-size: .95rem; }
+.tablewrap { flex: 1 1 0; min-height: 0; overflow: auto; }
+table.stint { border-collapse: separate; border-spacing: 2px; font-size: .74rem; line-height: 1.25; }
+.stint th { color: var(--text-secondary); font-weight: 600; padding: 0 .25rem; text-align: center; white-space: nowrap;
+  position: sticky; top: 0; background: var(--surface-1); }
+.stint thead tr:nth-child(2) th { top: 1.3em; }
+.stint th.p { font-weight: 400; color: var(--text-muted); font-size: .7rem; }
+.stint th.lap, .stint td.lap { text-align: left; white-space: nowrap; padding-right: .6rem; }
+.stint th.t, .stint td.t { text-align: right; white-space: nowrap; padding-right: .6rem; font-weight: 650; }
+.stint td { text-align: center; padding: .05rem .3rem; min-width: 2.6em; border-radius: .2rem; }
+.stint td.g { color: var(--text-muted); }
+.stint td.seq0 { background: var(--seq-0); color: #fff; } .stint td.seq1 { background: var(--seq-1); color: #fff; }
+.stint td.seq2 { background: var(--seq-2); color: #0b0b0b; } .stint td.seq3 { background: var(--seq-3); color: #0b0b0b; }
+.stint td.seq4 { background: var(--seq-4); color: #0b0b0b; }
+.stint td.na { color: var(--text-muted); text-align: left; font-style: italic; }
+.stint tr.dirty td.lap, .stint tr.dirty td.t { color: var(--text-muted); }
+.stint .tag { color: var(--text-secondary); font-size: .6rem; text-transform: uppercase; letter-spacing: .03em; margin-left: .35rem; font-weight: 400; }
+.stint tfoot td { position: sticky; bottom: 0; background: var(--surface-1); border-top: 1px solid var(--line);
+  padding-top: .2rem; color: var(--text-secondary); }
+.stint tfoot td.strong { color: var(--text-primary); font-weight: 700; }
+
 .empty { margin: auto; text-align: center; max-width: 40rem; color: var(--text-secondary); font-size: 1.1rem; line-height: 1.5; }
 .empty code { color: var(--text-primary); background: var(--surface-2); padding: 0 .3rem; border-radius: .25rem; word-break: break-all; }
 .tip { position: fixed; pointer-events: none; background: var(--surface-2); border: 1px solid var(--line);

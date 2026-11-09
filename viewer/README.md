@@ -41,9 +41,9 @@ update or after you edit a track's turn table.
 
 ## The views
 
-Keys: `1` to `4` switch views, left and right arrows change day, `F` toggles full screen, up and
-down arrows pick a corner on view 3 and a lap on view 4. Text sizes follow the screen width, so the
-same page reads on a laptop and a TV. The top bar names the day, the track, the bike and the
+Keys: the number on each tab switches to that view, left and right arrows change day, `F` toggles
+full screen, up and down arrows pick a corner on view 3, a lap on view 4 and a session on view 6.
+Text sizes follow the screen width, so the same page reads on a laptop and a TV. The top bar names the day, the track, the bike and the
 direction, with the view tabs on the row below.
 
 1. **Sessions:** best lap, ideal lap (best time in every section), gap, the cost of a cone chicane
@@ -66,9 +66,22 @@ direction, with the view tabs on the row below.
    what the ideal gains when no lap is picked. Every lap in the day's direction that the GPS
    recorded fully can be picked, including laps too slow to count toward the ideal (greyed).
 
+6. **Stint:** for endurance work. On top, every session's lap times against minutes on track
+   (`X` switches to lap number), one line per session. Dots are clean laps and rings are laps that
+   are not clean; the dashed line is the trend through the clean laps, drawn from five clean laps
+   up, and it is a line that one lap in traffic cannot tilt. Below, the picked session lap by
+   corner: what each lap lost to your best time today through each part of each corner, coloured
+   by size. "in" is from the brake point to the slowest point, "out" from there to the next brake
+   point. The bottom row is late minus early: the last third of the session's clean laps against
+   the first third in every part, which is the session board's fade split up, with one sentence
+   that totals it into corners and out of corners. Time that goes missing late into corners points
+   at braking and turn-in; time that goes missing on the way out points at drive and grip. A lap
+   the GPS did not fully record shows its reason instead of numbers.
+
 ![Map](screenshots/map.png)
 ![Corners](screenshots/corners.png)
 ![Delta](screenshots/delta.png)
+![Stint](screenshots/stint.png)
 
 Rules carried over from the tools: lap times are compared only within one track and one direction
 (both from GPS); AiM's own out and in laps never count; laps more than 3% off the day's best, and
@@ -79,6 +92,6 @@ from GPS speed (there is no throttle or brake channel).
 
 `lapviewer.py` (standard library only) watches the folder, groups files by the date the logger
 recorded, and runs `../scripts/run_day.py` for each new or changed date into `data/analysis/`.
-`xrk_ideal_lap.py` writes `viewer.json` (track path, sections, speed traces, and each lap's time
-delta along the track) next to its PNGs; the server combines it with the CSVs the other scripts
+`xrk_ideal_lap.py` writes `viewer.json` (track path, sections, speed traces, each lap's time
+delta along the track, and each session's trend and late-against-early numbers) next to its PNGs; the server combines it with the CSVs the other scripts
 write and serves it to `static/` (plain HTML, CSS and SVG, no libraries or internet).

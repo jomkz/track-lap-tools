@@ -109,5 +109,74 @@ class IdealLap(unittest.TestCase):
         self.assertAlmostEqual(total, 12.5 + 500 / 60, delta=TOL)
 
 
+class Trend(unittest.TestCase):
+    def test_steady_fade_is_found(self):
+        x = np.arange(1.5, 19.5, 1.5)               # a lap every minute and a half
+        got = lv.robust_trend(x, 90.0 + 0.1 * x)
+        self.assertAlmostEqual(got["s_per_min"], 0.1, places=6)
+        self.assertAlmostEqual(got["at_0_s"], 90.0, places=6)
+        self.assertEqual(got["n"], 12)
+
+    def test_one_lap_in_traffic_does_not_tilt_it(self):
+        x = np.arange(1.5, 19.5, 1.5)
+        y = 90.0 + 0.1 * x
+        y[-1] += 5.0                                # the last lap loses five seconds in traffic
+        got = lv.robust_trend(x, y)
+        self.assertAlmostEqual(got["s_per_min"], 0.1, delta=0.02)
+        least_squares = float(np.polyfit(x, y, 1)[0])
+        self.assertGreater(least_squares, 0.2)      # the plain fit reports more than double the real fade
+
+    def test_flat_session_with_noise_reads_flat(self):
+        rng = np.random.default_rng(7)
+        x = np.arange(1.5, 31.5, 1.5)
+        got = lv.robust_trend(x, 90.0 + rng.normal(0, 0.3, len(x)))
+        self.assertLess(abs(got["s_per_min"]), 0.03)
+
+    def test_too_few_laps_gives_no_trend(self):
+        self.assertIsNone(lv.robust_trend([1.5, 3.0, 4.5, 6.0], [90.0, 90.5, 91.0, 91.5]))
+        self.assertIsNotNone(lv.robust_trend([1.5, 3.0, 4.5, 6.0, 7.5], [90.0, 90.5, 91.0, 91.5, 92.0]))
+        self.assertIsNone(lv.robust_trend([2.0] * 6, [90.0, 90.5, 91.0, 91.5, 92.0, 92.5]))    # no spread in x
+
+    def test_one_step_is_not_reported_as_a_steep_fade(self):
+        # pace steps up by 1 s once, two thirds of the way through: the line must stay between the levels
+        x = np.arange(1.5, 19.5, 1.5)
+        y = np.where(x > 12.5, 91.0, 90.0)
+        got = lv.robust_trend(x, y)
+        line = got["at_0_s"] + got["s_per_min"] * x
+        self.assertTrue(np.all(line >= 89.9) and np.all(line <= 91.1))
+
+
+class LateMinusEarly(unittest.TestCase):
+    def test_per_section_difference(self):
+        laps = [[10.0, 20.0], [10.0, 20.0], [10.2, 20.0], [10.4, 20.1], [10.6, 20.1], [10.6, 20.1]]
+        got = lv.late_minus_early(laps, 2)
+        np.testing.assert_allclose(got, [0.6, 0.1], atol=1e-9)
+        self.assertAlmostEqual(float(got.sum()), 0.7)       # the same as the lap-time fade over those laps
+
+    def test_needs_two_separate_groups(self):
+        self.assertIsNone(lv.late_minus_early([[10.0], [10.1]], 0))
+        self.assertIsNone(lv.late_minus_early([[10.0], [10.1], [10.2]], 2))     # the thirds would overlap
+        np.testing.assert_allclose(lv.late_minus_early([[10.0], [10.1], [10.2]], 1), [0.2])
+
+
+class Rules(unittest.TestCase):
+    def setUp(self):
+        import lap_rules
+        self.r = lap_rules
+
+    def test_clean_laps(self):
+        self.assertEqual(self.r.clean_flags([90.0, 91.0, 92.0, 100.0, 90.5]), [True, True, True, False, True])
+        self.assertEqual(self.r.clean_flags([]), [])
+        self.assertEqual(self.r.clean_flags([95.0]), [True])
+        # exactly on the limit still counts: 107% of the 91.0 median
+        self.assertEqual(self.r.clean_flags([91.0, 91.0, 91.0 * 1.07]), [True, True, True])
+
+    def test_fade_is_last_third_minus_first_third(self):
+        self.assertIsNone(self.r.fade([90.0, 91.0]))
+        self.assertAlmostEqual(self.r.fade([90.0, 95.0, 91.0]), 1.0)
+        self.assertAlmostEqual(self.r.fade([90.0, 90.0, 93.0, 93.0, 91.0, 92.0, 92.0]), 2.0)     # thirds of two laps
+        self.assertEqual([self.r.third(n) for n in (0, 2, 3, 5, 6, 12)], [0, 0, 1, 1, 2, 4])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -59,3 +59,36 @@ def composite_clock(grid, pieces, curves):
 def delta_cs(clock, ref_clock):
     """Time lost to the reference lap so far, in hundredths of a second (positive = behind)."""
     return [int(round(float(x) * 100)) for x in np.asarray(clock) - np.asarray(ref_clock)]
+
+
+# ---------------------------------------------------------------- stint view
+
+MIN_TREND_LAPS = 5
+
+
+def robust_trend(x, y, min_points=MIN_TREND_LAPS):
+    """A line through lap times (y, seconds) against time on track (x, minutes) that one slow lap
+    cannot tilt: the Theil-Sen line, whose slope is the median of the slopes between every pair of
+    laps and whose level is the median of what is left. Least squares would let a single lap in
+    traffic set the slope. Returns {"s_per_min", "at_0_s", "n"}, or None with fewer than
+    min_points laps (a slope through a handful of laps says nothing).
+    It is a guide for the eye, not a rate to quote: a session whose pace steps once (a new tire,
+    a change of line) has no single slope, and the line will lie somewhere between the two levels."""
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    if len(x) < min_points:
+        return None
+    i, j = np.triu_indices(len(x), 1)
+    ok = x[j] != x[i]
+    if not ok.any():
+        return None
+    slope = float(np.median((y[j][ok] - y[i][ok]) / (x[j][ok] - x[i][ok])))
+    return {"s_per_min": slope, "at_0_s": float(np.median(y - slope * x)), "n": int(len(x))}
+
+
+def late_minus_early(section_times, n_third):
+    """Per section: the mean over the last n_third laps minus the mean over the first n_third.
+    section_times: one row of section times per lap, in the order ridden. None if n_third is 0."""
+    rows = np.asarray(section_times, float)
+    if not n_third or len(rows) < 2 * n_third:
+        return None
+    return rows[-n_third:].mean(axis=0) - rows[:n_third].mean(axis=0)

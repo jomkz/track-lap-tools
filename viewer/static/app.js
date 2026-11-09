@@ -1,12 +1,15 @@
 "use strict";
 // Pit lap viewer front end. Plain JS and SVG, no internet, no libraries.
 
-const S = { days: [], idx: 0, day: null, view: "board", corner: null, lap: null, version: -1, unit: "kmh" };
+const S = { days: [], idx: 0, day: null, view: "board", corner: null, lap: null, session: null, stintX: "min", version: -1, unit: "kmh" };
 const $ = (s, el = document) => el.querySelector(s);
 const NS = "http://www.w3.org/2000/svg";
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-try { S.view = localStorage.getItem("lapviewer.view") || "board"; } catch (e) { /* storage blocked */ }
+try {
+  S.view = localStorage.getItem("lapviewer.view") || "board";
+  S.stintX = localStorage.getItem("lapviewer.stintx") === "lap" ? "lap" : "min";
+} catch (e) { /* storage blocked */ }
 
 function fmtLap(sec) {
   if (sec == null || isNaN(sec)) return "";
@@ -117,6 +120,7 @@ function render() {
   if (S.view === "map") renderMap(main, d);
   else if (S.view === "corners") renderCorners(main, d);
   else if (S.view === "delta") renderDelta(main, d);
+  else if (S.view === "stint") renderStint(main, d);
   else renderBoard(main, d);
 }
 
@@ -653,6 +657,166 @@ function renderDelta(main, d) {
   if (on) on.scrollIntoView({ block: "nearest" });
 }
 
+// ---------------------------------------------------------------- 6. stint
+const fmtLapTenths = (sec) => { const mm = Math.floor(sec / 60); return `${mm}:${(sec - mm * 60).toFixed(1).padStart(4, "0")}`; };
+// a gap of under a second without its leading zero, to keep the lap-by-corner table narrow
+function fmtGap(v) {
+  if (v == null || isNaN(v)) return "";
+  const a = Math.abs(v), sign = v < -0.004 ? "−" : "";
+  if (a < 0.005) return "·";
+  return sign + (a >= 0.995 ? a.toFixed(1) : "." + String(Math.round(a * 100)).padStart(2, "0"));
+}
+
+function stintSessions(d) {
+  const meta = new Map(d.sessions.map((x) => [x.session, x]));
+  return ((d.stint && d.stint.sessions) || []).filter((x) => meta.has(x.session))
+    .map((x) => ({ ...x, meta: meta.get(x.session) })).sort((a, b) => a.meta.number - b.meta.number);
+}
+
+// lap time against time on track, one line per session; hollow dots are laps that are not clean
+function drawStint(parent, { sessions, pick, byLap }) {
+  const W = Math.max(300, parent.clientWidth), H = Math.max(80, parent.clientHeight);
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const fs = rem * 0.78;
+  const m = { l: fs * 4.2, r: fs * 2.6, t: fs * 0.9, b: fs * 2.7 };
+  if (H - m.t - m.b < 20) return;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Lap times through each session" }, parent);
+  const xOf = (l) => (byLap ? l.lap : l.end_min);
+  const every = sessions.flatMap((sx) => sx.laps);
+  const cleanT = every.filter((l) => l.clean).map((l) => l.time_s);
+  const ts = cleanT.length ? cleanT : every.map((l) => l.time_s);
+  let lo = Math.min(...ts), hi = Math.max(...ts);
+  if (hi - lo < 1) { const mid = (hi + lo) / 2; lo = mid - 0.5; hi = mid + 0.5; }
+  const y0 = lo - (hi - lo) * 0.1, y1 = hi + (hi - lo) * 0.12;
+  const x0 = byLap ? 0.5 : 0, x1 = Math.max(...every.map(xOf)) * (byLap ? 1 : 1.02) + (byLap ? 0.5 : 0);
+  const X = (x) => m.l + ((x - x0) / (x1 - x0)) * (W - m.l - m.r);
+  const Y = (y) => H - m.b - ((y - y0) / (y1 - y0)) * (H - m.t - m.b);
+  const stepY = niceStep(y1 - y0, Math.max(2, Math.floor((H - m.t - m.b) / (fs * 1.7))));
+  for (let i = Math.ceil(y0 / stepY - 1e-9); i * stepY <= y1 + 1e-9; i++) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(i * stepY), y2: Y(i * stepY), stroke: "var(--grid)", "stroke-width": 1 }, svg);
+    const t = el("text", { x: m.l - 8, y: Y(i * stepY), "text-anchor": "end", "dominant-baseline": "middle", "font-size": fs * 0.85, class: "muted" }, svg);
+    t.textContent = fmtLapTenths(i * stepY);
+  }
+  const stepX = niceStep(x1 - x0, Math.max(3, Math.floor((W - m.l - m.r) / (fs * 4))));
+  for (let i = Math.ceil(x0 / Math.max(stepX, byLap ? 1 : stepX)); i * Math.max(stepX, byLap ? 1 : stepX) <= x1; i++) {
+    const x = i * Math.max(stepX, byLap ? 1 : stepX);
+    if (x <= x0) continue;
+    const t = el("text", { x: X(x), y: H - m.b + fs * 1.1, "text-anchor": "middle", "font-size": fs * 0.85, class: "muted" }, svg);
+    t.textContent = x;
+  }
+  const xl = el("text", { x: (m.l + W - m.r) / 2, y: H - fs * 0.35, "text-anchor": "middle", "font-size": fs * 0.85, class: "sec" }, svg);
+  xl.textContent = (byLap ? "Lap number" : "Minutes since the logger started") + "  \u00b7  dots: clean laps, rings: not clean, dashes: trend through the clean laps";
+  const clip = el("clipPath", { id: "stintclip" }, svg);
+  el("rect", { x: m.l - 2, y: m.t - 2, width: W - m.l - m.r + 4, height: H - m.t - m.b + 4 }, clip);
+  const rr = Math.max(4, rem * 0.2);
+  // the picked session is drawn last so it sits on top
+  for (const sx of [...sessions].sort((a, b) => (a.session === pick) - (b.session === pick))) {
+    const g = el("g", { opacity: pick && sx.session !== pick ? 0.55 : 1 }, svg);
+    const color = sessionColor(sx.meta.number);
+    el("polyline", { points: sx.laps.map((l) => `${X(xOf(l)).toFixed(1)},${Y(l.time_s).toFixed(1)}`).join(" "), fill: "none",
+      stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "clip-path": "url(#stintclip)" }, g);
+    const cl = sx.laps.filter((l) => l.clean);
+    if (sx.trend && cl.length > 1) {      // fitted against minutes, so against lap number it is not quite straight
+      el("polyline", { points: cl.map((l) => `${X(xOf(l)).toFixed(1)},${Y(sx.trend.at_0_s + sx.trend.s_per_min * l.end_min).toFixed(1)}`).join(" "),
+        fill: "none", stroke: color, "stroke-width": 2, "stroke-dasharray": "7 6", "clip-path": "url(#stintclip)" }, g);
+    }
+    for (const l of sx.laps) {
+      const over = l.time_s > y1, cx = X(xOf(l)), cy = over ? m.t + rr : Y(l.time_s);
+      if (over) {
+        el("polygon", { points: `${cx},${cy - rr} ${cx - rr},${cy + rr} ${cx + rr},${cy + rr}`, fill: "var(--surface-1)", stroke: color, "stroke-width": 2 }, g);
+      } else {
+        el("circle", { cx, cy, r: rr, fill: l.clean ? color : "var(--surface-1)", stroke: l.clean ? "var(--surface-1)" : color, "stroke-width": 2 }, g);
+      }
+      const hit = el("circle", { cx, cy, r: rr * 2.6, fill: "transparent" }, svg);
+      hit.addEventListener("pointermove", (ev) => showTip(`<b>Session ${sx.meta.number}, lap ${l.lap}</b><br>${fmtLap(l.time_s)}${l.clean ? "" : " (not a clean lap)"}<br>ended at minute ${l.end_min.toFixed(1)}`, ev));
+      hit.addEventListener("pointerleave", hideTip);
+    }
+    const last = sx.laps[sx.laps.length - 1];
+    const lt = el("text", { x: X(xOf(last)) + rr + 6, y: Math.max(m.t + fs * 0.5, Y(Math.min(last.time_s, y1))), "dominant-baseline": "middle", "font-size": fs * 0.9, "font-weight": 650 }, g);
+    lt.textContent = `S${sx.meta.number}`;
+  }
+}
+
+function renderStint(main, d) {
+  const all = stintSessions(d);
+  if (!all.length) {
+    main.innerHTML = `<div class="empty"><p>No stint numbers for this day yet.</p>
+      <p class="note">It was analysed before this view existed. It is analysed again on its own; the status at the top right says when.</p></div>`;
+    return;
+  }
+  const longest = [...all].sort((a, b) => b.laps.length - a.laps.length)[0];
+  const sx = all.find((x) => x.session === S.session) || longest;
+  S.session = sx.session;
+  const byLap = S.stintX === "lap";
+
+  const top = document.createElement("div");
+  top.className = "panel col stint-top";
+  main.appendChild(top);
+  const chips = all.map((x) => {
+    const f = x.meta.fade_s;
+    return `<button data-s="${esc(x.session)}" aria-pressed="${x.session === sx.session}"><span class="sw" style="background:${sessionColor(x.meta.number)}"></span>
+      <span title="Session ${x.meta.number}, ${esc(x.session)}">S${x.meta.number}</span><span class="note">${x.laps.length} laps, ${f == null ? "too few for a fade" : `fade ${signed(f)} s`}</span></button>`;
+  }).join("");
+  top.innerHTML = `<div class="stint-head"><h2>Lap times by session</h2>
+      <div class="corner-list stint-pick">${chips}</div>
+      <button id="stintx" class="ghost" title="Bottom scale: ${byLap ? "lap number" : "minutes since the logger started"}. Click or press X to switch.">${byLap ? "Laps" : "Minutes"} &#8644;</button></div>`;
+  top.querySelector(".stint-head").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    if (b.id === "stintx") toggleStintX();
+    else { S.session = b.dataset.s; render(); }
+  });
+  const box = document.createElement("div");
+  box.className = "chart";
+  top.appendChild(box);
+  requestAnimationFrame(() => { if (box.isConnected) drawStint(box, { sessions: all, pick: sx.session, byLap }); });
+
+  // lap by corner for the picked session
+  const cols = [];      // one per section, grouped under its corner
+  d.corners.forEach((c) => d.sections.forEach((x, k) => { if (x.corner === c.name) cols.push({ k, corner: c, part: x.part || "", best: x.ideal_s }); }));
+  const rowOf = new Map(d.laps.filter((r) => r.session === sx.session).map((r) => [r.lap, r]));
+  const le = sx.late_early;
+  const vals = [];
+  sx.laps.forEach((l) => { const r = rowOf.get(l.lap); if (l.placed && r && r.sec_s) cols.forEach((c) => vals.push(r.sec_s[c.k] - c.best)); });
+  const pos = vals.filter((v) => v > 0.02).sort((a, b) => a - b);
+  const cap = Math.min(1, Math.max(0.2, pos.length ? pos[Math.floor(pos.length * 0.9)] : 0.2));
+  const cell = (v) => {
+    const step = v < 0.02 ? -1 : Math.min(4, Math.floor((v / cap) * 5));
+    return `<td class="g${step < 0 ? "" : " seq" + step}">${fmtGap(v)}</td>`;
+  };
+  const head1 = d.corners.map((c) => `<th colspan="${cols.filter((x) => x.corner === c).length}" title="${esc(c.name.replace(/\+/g, " + "))}">${esc(turnsIn(c.name).join("+") || c.name)}</th>`).join("");
+  const head2 = cols.map((c) => `<th class="p">${c.part === "whole" ? "" : esc(c.part)}</th>`).join("");
+  const body = sx.laps.map((l) => {
+    const r = rowOf.get(l.lap);
+    const tag = le && le.early.includes(l.lap) ? '<span class="tag">early</span>' : le && le.late.includes(l.lap) ? '<span class="tag">late</span>' : "";
+    const cells = l.placed && r && r.sec_s ? cols.map((c) => cell(r.sec_s[c.k] - c.best)).join("")
+      : `<td class="na" colspan="${cols.length}">${esc((r && r.why_out) || "not placed on the track")}</td>`;
+    return `<tr class="${l.clean ? "" : "dirty"}"><td class="lap">L${l.lap}${tag}</td><td class="t">${fmtLap(l.time_s)}${l.clean ? "" : '<span class="tag">not clean</span>'}</td>${cells}</tr>`;
+  }).join("");
+  const foot = le ? `<tr class="le"><td class="lap">late &minus; early</td><td class="t">${signed(le.lap_s)} s</td>${le.sec_s.length === d.sections.length
+    ? cols.map((c) => `<td class="${Math.abs(le.sec_s[c.k]) >= 0.05 ? "strong" : ""}">${fmtGap(le.sec_s[c.k])}</td>`).join("") : ""}</tr>` : "";
+  const sum = le
+    ? `Last ${le.late.length} clean lap${le.late.length > 1 ? "s" : ""} against the first ${le.early.length}: <b>${signed(le.lap_s)} s</b> a lap.
+       Into corners (braking and turn-in) <b>${signed(le.in_s)} s</b>, out of corners (drive) <b>${signed(le.out_s)} s</b>${Math.abs(le.whole_s) >= 0.005 ? `, corners with no split <b>${signed(le.whole_s)} s</b>` : ""}.`
+    : "Too few clean laps to compare late laps with early ones (it takes three).";
+  const bot = document.createElement("div");
+  bot.className = "panel stint-bot";
+  bot.innerHTML = `<h2>Session ${sx.meta.number} lap by corner <span class="note">(${esc(sx.session)}; seconds lost to your best time through each part today)</span></h2>
+    <p class="stint-sum">${sum}</p>
+    <div class="tablewrap"><table class="stint"><thead><tr><th rowspan="2" class="lap">Lap</th><th rowspan="2" class="t">Time</th>${head1}</tr><tr>${head2}</tr></thead>
+    <tbody>${body}</tbody><tfoot>${foot}</tfoot></table></div>
+    <p class="note"><span class="scale">${[0, 1, 2, 3, 4].map((k) => `<span style="background:var(--seq-${k})"></span>`).join("")}</span>
+    0 to ${cap.toFixed(2)} s and over; &middot; = within 0.005 s of the best. in = brake point to slowest point, out = from there to the next brake point.
+    Late &minus; early is the lap table's fade split by part (bold from 0.05 s). The trend needs ${d.stint.min_trend_laps} clean laps. Keys: up and down change session, X switches the chart's bottom scale.</p>`;
+  main.appendChild(bot);
+}
+
+function toggleStintX() {
+  S.stintX = S.stintX === "lap" ? "min" : "lap";
+  try { localStorage.setItem("lapviewer.stintx", S.stintX); } catch (e) { /* ignore */ }
+  render();
+}
+
 // ---------------------------------------------------------------- input
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setView(t.dataset.view)));
 function setView(v) {
@@ -673,6 +837,8 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "2") setView("map");
   else if (e.key === "3") setView("corners");
   else if (e.key === "4") setView("delta");
+  else if (e.key === "6") setView("stint");
+  else if ((e.key === "x" || e.key === "X") && S.view === "stint") toggleStintX();
   else if (e.key === "f" || e.key === "F") toggleFs();
   else if (e.key === "ArrowLeft") $("#prev").click();
   else if (e.key === "ArrowRight") $("#next").click();
@@ -689,6 +855,13 @@ document.addEventListener("keydown", (e) => {
     const i = laps.findIndex((l) => lapKey(l) === S.lap);
     const j = i < 0 ? (e.key === "ArrowDown" ? 0 : laps.length - 1) : Math.max(0, Math.min(laps.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));
     S.lap = lapKey(laps[j]);
+    render();
+    e.preventDefault();
+  } else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && S.view === "stint" && S.day) {
+    const all = stintSessions(S.day);
+    if (!all.length) return;
+    const i = all.findIndex((x) => x.session === S.session);
+    S.session = all[Math.max(0, Math.min(all.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))].session;
     render();
     e.preventDefault();
   }
