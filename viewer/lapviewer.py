@@ -20,7 +20,8 @@ What it does
 
 Options
     --folder PATH   watch this folder instead of the one in config.json
-    --port N        port (default from config.json, 8765)
+    --port N        port (default from config.json, 8765). If another program has the port, the
+                    next free one is used and the start-up text says which.
     --no-browser    don't open the browser
     --once          process the folder once, write summaries, and exit (no web server)
 """
@@ -32,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import socketserver
 import subprocess
 import sys
@@ -39,6 +41,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+import urllib.request
 import webbrowser
 from datetime import datetime
 
@@ -62,6 +65,7 @@ DEFAULTS = {
     "open_browser": True,
 }
 XRK_EXT = (".xrk", ".xrz")
+PORT_TRIES = 10                        # ports tried from the configured one when another program has it
 
 
 # ---------------------------------------------------------------- config
@@ -524,6 +528,42 @@ class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+def viewer_at(port):
+    """True when a lap viewer already answers on this port, and not some other program."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=2) as r:
+            st = json.load(r)
+    except (OSError, ValueError):
+        return False
+    return isinstance(st, dict) and "xrk_folder" in st and "version" in st
+
+
+def port_taken(port):
+    """True when any program accepts connections on this port. Asked before binding, because on
+    Windows a second program can bind a port that is already in use."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def open_server(first_port, tries=PORT_TRIES):
+    """Listen on first_port, or on the next free port when another program has it.
+    Returns (server, port). server is None when a lap viewer is already running on `port` (use
+    that one); port is None too when no port in the range could be used."""
+    for port in range(first_port, first_port + tries):
+        if viewer_at(port):
+            return None, port
+        if not port_taken(port):
+            try:
+                return Server(("127.0.0.1", port), Handler), port
+            except OSError:
+                pass
+        print(f"Port {port} is in use by another program; trying {port + 1}", flush=True)
+    return None, None
+
+
 def main():
     ap = argparse.ArgumentParser(description="Pit lap viewer")
     ap.add_argument("--folder")
@@ -547,17 +587,21 @@ def main():
             print(f"  problem with {k}: {e}")
         return
     Handler.proc, Handler.cfg = proc, cfg
-    threading.Thread(target=proc.loop, daemon=True).start()
-    try:
-        srv = Server(("127.0.0.1", cfg["port"]), Handler)
-    except OSError:
-        url = f"http://127.0.0.1:{cfg['port']}/"
-        print(f"Port {cfg['port']} is busy; the viewer may already be running at {url}")
+    srv, port = open_server(cfg["port"])
+    if port is None:
+        print(f"No free port from {cfg['port']} to {cfg['port'] + PORT_TRIES - 1}. "
+              'Set another "port" in config.json, or start with --port N.')
+        return
+    url = f"http://127.0.0.1:{port}/"
+    if srv is None:
+        print(f"The lap viewer is already running at {url}")
         if cfg["open_browser"] and not a.no_browser:
             webbrowser.open(url)
         return
-    url = f"http://127.0.0.1:{cfg['port']}/"
-    print(f"Lap viewer at {url}  (close this window to stop it)")
+    if port != cfg["port"]:
+        print(f'Using port {port} this time. To keep it, set "port": {port} in config.json.', flush=True)
+    threading.Thread(target=proc.loop, daemon=True).start()      # only once the port is ours
+    print(f"Lap viewer at {url}  (close this window to stop it)", flush=True)
     if cfg["open_browser"] and not a.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:

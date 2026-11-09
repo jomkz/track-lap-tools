@@ -2,9 +2,12 @@
 
 Run from the repository folder:  python3 -I -m unittest discover -s tests
 """
+import http.server
+import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -60,6 +63,90 @@ class ChicaneSummary(unittest.TestCase):
             self.assertEqual(lapviewer.parse_chicane_md(p),
                              {"name": "Turn 6 chicane", "per_lap_s": 0.7, "low_s": 0.55, "high_s": 0.70})
             self.assertIsNone(lapviewer.parse_chicane_md(os.path.join(d, "missing.md")))
+
+
+def serve(reply):
+    """A throwaway local web server whose every GET answers with reply = (status, body bytes).
+    Returns (server, port); close it with server.shutdown() and server.server_close()."""
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(reply[0])
+            self.send_header("Content-Length", str(len(reply[1])))
+            self.end_headers()
+            self.wfile.write(reply[1])
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+class PortInUse(unittest.TestCase):
+    """The configured port may belong to another program, or to a viewer that is already running."""
+    OTHER = (401, b"Unauthorized")                                             # some other program's web server
+    VIEWER = (200, json.dumps({"state": "idle", "version": 3, "xrk_folder": "/laps"}).encode())
+
+    def setUp(self):
+        self.open = []
+
+    def tearDown(self):
+        for srv in self.open:
+            srv.shutdown()
+            srv.server_close()
+
+    def start(self, reply):
+        srv, port = serve(reply)
+        self.open.append(srv)
+        return port
+
+    def test_tells_a_viewer_from_another_program(self):
+        self.assertTrue(lapviewer.viewer_at(self.start(self.VIEWER)))
+        self.assertFalse(lapviewer.viewer_at(self.start(self.OTHER)))
+        self.assertFalse(lapviewer.viewer_at(self.start((200, b'{"some": "other json"}'))))
+        self.assertFalse(lapviewer.viewer_at(self.start((200, b"<html>not json</html>"))))
+
+    def test_nothing_listening(self):
+        srv, port = serve(self.OTHER)
+        srv.shutdown()
+        srv.server_close()                              # the port is free again
+        self.assertFalse(lapviewer.viewer_at(port))
+        self.assertFalse(lapviewer.port_taken(port))
+
+    def test_port_taken_by_any_program(self):
+        self.assertTrue(lapviewer.port_taken(self.start(self.OTHER)))
+        self.assertTrue(lapviewer.port_taken(self.start(self.VIEWER)))
+
+    def test_another_program_on_the_port_moves_the_viewer_to_the_next_free_one(self):
+        taken = self.start(self.OTHER)
+        srv, port = lapviewer.open_server(taken, tries=20)
+        try:
+            self.assertIsNotNone(srv)
+            self.assertGreater(port, taken)
+            self.assertLess(port, taken + 20)
+            self.assertEqual(srv.server_address[1], port)
+        finally:
+            if srv:
+                srv.server_close()
+
+    def test_a_running_viewer_is_reused_not_doubled(self):
+        running = self.start(self.VIEWER)
+        self.assertEqual(lapviewer.open_server(running), (None, running))
+
+    def test_free_port_is_taken_as_asked(self):
+        probe, port = serve(self.OTHER)
+        probe.shutdown()
+        probe.server_close()
+        srv, got = lapviewer.open_server(port)
+        try:
+            self.assertEqual(got, port)
+        finally:
+            srv.server_close()
+
+    def test_no_port_left(self):
+        taken = self.start(self.OTHER)
+        self.assertEqual(lapviewer.open_server(taken, tries=1), (None, None))
 
 
 if __name__ == "__main__":
