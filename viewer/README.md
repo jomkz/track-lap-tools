@@ -26,7 +26,7 @@ Options: `--folder PATH` (watch another folder), `--port N`, `--no-browser`, `--
 | Folder | What | Setting in `config.json` |
 |---|---|---|
 | `xrk/` | Where it looks for `.xrk` / `.xrz` files, including subfolders. Files dropped on the page are saved in `xrk/dropped/`. Point it at the folder Race Studio 3 saves to and new sessions show up on their own. Where a `.xrz` sits next to the `.xrk` of the same session, only the `.xrk` is read. | `xrk_folder` |
-| `summaries/<date>/` | Small results per day: `day.json` (everything the viewer shows), `sessions.csv`, `laps.csv`, one `<session>.json` per session. About 150 KB a day. Point this at a synced cloud folder (for example Google Drive for desktop) to get results there without uploading the large `.xrk` files. | `summary_folder` |
+| `summaries/<date>/` | Small results per day: `day.json` (everything the viewer shows), `sessions.csv`, `laps.csv`, one `<session>.json` per session. About 170 KB a day. Point this at a synced cloud folder (for example Google Drive for desktop) to get results there without uploading the large `.xrk` files. | `summary_folder` |
 | `data/` | Analysis cache (the same outputs `run_day.py` writes, plus logs). Safe to delete; it is rebuilt. | `data_folder` |
 
 `config.json` is created on first start. Relative paths are inside `viewer/`; absolute paths
@@ -42,7 +42,7 @@ update or after you edit a track's turn table.
 ## The views
 
 Keys: the number on each tab switches to that view, left and right arrows change day, `F` toggles
-full screen, up and down arrows pick a corner on view 3, a lap on view 4 and a session on view 6.
+full screen, up and down arrows pick a corner on views 3 and 5, a lap on view 4 and a session on view 6.
 Text sizes follow the screen width, so the same page reads on a laptop and a TV. The top bar names the day, the track, the bike and the
 direction, with the view tabs on the row below.
 
@@ -66,6 +66,17 @@ direction, with the view tabs on the row below.
    what the ideal gains when no lap is picked. Every lap in the day's direction that the GPS
    recorded fully can be picked, including laps too slow to count toward the ideal (greyed).
 
+5. **Grip:** lean angle and the grip circle, both estimated from GPS. On the left, the grip circle
+   of the best lap: one dot per moment, cornering force left and right against braking and
+   acceleration, with the picked corner's dots in white and an outline of the grip you reached
+   through the day in each direction. Under it, for the picked corner: how much of the corner was
+   spent near that outline, and how much grip stayed in use between the hardest braking and the
+   deepest lean (near 100% means braking was traded for lean all the way in; a low figure means
+   the brake was let go before leaning in). On the right, lean angle per turn: on the best lap,
+   the deepest on any lap, and each session's middle value in order, so a turn where lean falls
+   through the day stands out next to the tire signal. Lean is the angle the cornering force
+   needs, for bike and rider together on a flat road; hanging off, tire width, banking and crests
+   are not in it. The logger's gyro is used as a cross-check, and the view says if it disagrees.
 6. **Stint:** for endurance work. On top, every session's lap times against minutes on track
    (`X` switches to lap number), one line per session. Dots are clean laps and rings are laps that
    are not clean; the dashed line is the trend through the clean laps, drawn from five clean laps
@@ -81,17 +92,19 @@ direction, with the view tabs on the row below.
 ![Map](screenshots/map.png)
 ![Corners](screenshots/corners.png)
 ![Delta](screenshots/delta.png)
+![Grip](screenshots/grip.png)
 ![Stint](screenshots/stint.png)
 
 Rules carried over from the tools: lap times are compared only within one track and one direction
 (both from GPS); AiM's own out and in laps never count; laps more than 3% off the day's best, and
 laps the GPS did not fully record, are left out of the ideal; throttle and braking are inferred
-from GPS speed (there is no throttle or brake channel).
+from GPS speed (there is no throttle or brake channel); lean and grip are estimates from GPS too.
 
 ## How it fits together
 
 `lapviewer.py` (standard library only) watches the folder, groups files by the date the logger
 recorded, and runs `../scripts/run_day.py` for each new or changed date into `data/analysis/`.
 `xrk_ideal_lap.py` writes `viewer.json` (track path, sections, speed traces, each lap's time
-delta along the track, and each session's trend and late-against-early numbers) next to its PNGs; the server combines it with the CSVs the other scripts
+delta along the track, each session's trend and late-against-early numbers, and lean and grip
+per turn) next to its PNGs; the server combines it with the CSVs the other scripts
 write and serves it to `static/` (plain HTML, CSS and SVG, no libraries or internet).

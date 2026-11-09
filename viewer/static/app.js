@@ -120,6 +120,7 @@ function render() {
   if (S.view === "map") renderMap(main, d);
   else if (S.view === "corners") renderCorners(main, d);
   else if (S.view === "delta") renderDelta(main, d);
+  else if (S.view === "grip") renderGrip(main, d);
   else if (S.view === "stint") renderStint(main, d);
   else renderBoard(main, d);
 }
@@ -657,6 +658,137 @@ function renderDelta(main, d) {
   if (on) on.scrollIntoView({ block: "nearest" });
 }
 
+// ---------------------------------------------------------------- 5. grip (lean and the grip circle)
+const inCorner = (dist, c) => (c.wrap ? dist >= c.d0 || dist <= c.d1 : dist >= c.d0 && dist <= c.d1);
+const deg = (v) => (v == null || isNaN(v) ? "" : `${v.toFixed(1)}°`);
+
+// cornering g (left and right) against acceleration and braking g, one dot per moment of the best lap
+function drawGG(parent, d, corner) {
+  const G = d.grip, W = Math.max(200, parent.clientWidth), H = Math.max(200, parent.clientHeight);
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const fs = rem * 0.75, size = Math.min(W, H), cx = W / 2, cy = H / 2;
+  const env = G.envelope.g100.map((v) => v / 100), step = (G.envelope.step_deg * Math.PI) / 180;
+  const pts = G.gg.d.map((x, i) => ({ d: x, lat: G.gg.lat100[i] / 100, lon: G.gg.lon100[i] / 100 }));
+  const reach = Math.max(1.05, ...env, ...pts.map((p) => Math.hypot(p.lat, p.lon)));
+  const rMax = Math.ceil(reach * 20 + 1) / 20, k = Math.min(H / 2 - fs * 1.7, W / 2 - fs * 5.5) / rMax;
+  const X = (lat) => cx + lat * k, Y = (lon) => cy - lon * k;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Grip circle of the best lap" }, parent);
+  for (let r = 0.5; r <= rMax + 1e-9; r += 0.5) {
+    el("circle", { cx, cy, r: r * k, fill: "none", stroke: "var(--grid)", "stroke-width": 1 }, svg);
+    const t = el("text", { x: cx + 4, y: cy - r * k - 3, "font-size": fs * 0.85, class: "muted" }, svg);
+    t.textContent = `${r.toFixed(1)} g`;
+  }
+  el("line", { x1: cx - rMax * k, x2: cx + rMax * k, y1: cy, y2: cy, stroke: "var(--grid)", "stroke-width": 1 }, svg);
+  el("line", { x1: cx, x2: cx, y1: cy - rMax * k, y2: cy + rMax * k, stroke: "var(--grid)", "stroke-width": 1 }, svg);
+  for (const [txt, x, y, anchor] of [["accelerating", cx, cy - rMax * k - fs * 0.45, "middle"], ["braking", cx, cy + rMax * k + fs * 1.15, "middle"],
+    ["left turn", cx - rMax * k - fs * 0.5, cy + fs * 0.3, "end"], ["right turn", cx + rMax * k + fs * 0.5, cy + fs * 0.3, "start"]]) {
+    const t = el("text", { x, y, "text-anchor": anchor, "font-size": fs * 0.9, class: "sec" }, svg);
+    t.textContent = txt;
+  }
+  el("polygon", { points: env.map((r, i) => `${X(r * Math.cos(i * step)).toFixed(1)},${Y(r * Math.sin(i * step)).toFixed(1)}`).join(" "),
+    fill: "var(--surface-2)", "fill-opacity": 0.55, stroke: "var(--text-secondary)", "stroke-width": 2, "stroke-linejoin": "round" }, svg);
+  const mine = (p) => corner && inCorner(p.d, corner);
+  const r0 = Math.max(2, rem * 0.09), r1 = Math.max(4, rem * 0.17);
+  for (const p of pts) if (!mine(p)) el("circle", { cx: X(p.lat), cy: Y(p.lon), r: r0, fill: "var(--series-best)", "fill-opacity": corner ? 0.4 : 0.7 }, svg);
+  for (const p of pts) if (mine(p)) el("circle", { cx: X(p.lat), cy: Y(p.lon), r: r1, fill: "var(--text-primary)", stroke: "var(--surface-1)", "stroke-width": 1.5 }, svg);
+  // one hit area: the tooltip follows the nearest dot
+  const outline = (lat, lon) => {
+    const pos = ((Math.atan2(lon, lat) / step) % env.length + env.length) % env.length, lo = Math.floor(pos) % env.length, f = pos - Math.floor(pos);
+    return env[lo] * (1 - f) + env[(lo + 1) % env.length] * f;
+  };
+  const hit = el("rect", { x: 0, y: 0, width: W, height: H, fill: "transparent" }, svg);
+  hit.addEventListener("pointermove", (ev) => {
+    const b = svg.getBoundingClientRect(), px = ((ev.clientX - b.left) / b.width) * W, py = ((ev.clientY - b.top) / b.height) * H;
+    let best = null, bd = Infinity;
+    for (const p of pts) { const dd = Math.hypot(X(p.lat) - px, Y(p.lon) - py); if (dd < bd) { bd = dd; best = p; } }
+    if (!best || bd > rem * 1.5) { hideTip(); return; }
+    const c = d.corners.find((x) => inCorner(best.d, x));
+    const share = Math.round((100 * Math.hypot(best.lat, best.lon)) / outline(best.lat, best.lon));
+    showTip(`<b>${esc(c ? c.name.replace(/\+/g, " + ") : "")}</b> at ${best.d.toFixed(0)} m<br>Cornering <b>${Math.abs(best.lat).toFixed(2)} g</b> ${best.lat >= 0 ? "right" : "left"} (about ${deg((Math.atan(Math.abs(best.lat)) * 180) / Math.PI)} of lean)<br>
+      ${best.lon >= 0 ? "Accelerating" : "Braking"} <b>${Math.abs(best.lon).toFixed(2)} g</b><br>${share}% of the outline in that direction`, ev);
+  });
+  hit.addEventListener("pointerleave", hideTip);
+}
+
+function renderGrip(main, d) {
+  const G = d.grip;
+  if (!G || !G.turns.length) {
+    main.innerHTML = `<div class="empty"><p>No lean and grip numbers for this day yet.</p>
+      <p class="note">It was analysed before this view existed, or it has too few laps for a grip outline. It is analysed again on its own; the status at the top right says when.</p></div>`;
+    return;
+  }
+  const c = d.corners.find((x) => x.name === S.corner) || d.corners[0];
+  const gc = new Map(G.corners.map((x) => [x.name, x]));
+  const chips = document.createElement("div");
+  chips.className = "corner-list";
+  chips.innerHTML = d.corners.map((x) => {
+    const g = gc.get(x.name);
+    return `<button aria-pressed="${x.name === c.name}" data-c="${esc(x.name)}"><span>${esc(x.name.replace(/\+/g, " + "))}</span>${g ? `<span class="lv">${g.near_limit_pct}%</span>` : ""}</button>`;
+  }).join("");
+  chips.addEventListener("click", (ev) => {
+    const b = ev.target.closest("button");
+    if (b) { S.corner = b.dataset.c; render(); }
+  });
+  main.appendChild(chips);
+
+  const wrap = document.createElement("div");
+  wrap.className = "split grip";
+  main.appendChild(wrap);
+  const left = document.createElement("div");
+  left.className = "panel col";
+  const right = document.createElement("div");
+  right.className = "panel gripside";
+  wrap.append(left, right);
+
+  const g = gc.get(c.name);
+  const near = Math.round(100 - G.near_limit * 100);
+  const say = !g ? "No grip numbers for this corner on the best lap."
+    : `${esc(c.name.replace(/\+/g, " + "))}: within ${near}% of the outline for <b>${g.near_limit_pct}%</b> of the corner. `
+      + (g.entry_blend_pct == null ? "No brake zone before its deepest lean."
+        : `From the hardest braking (${g.peak_brake_g.toFixed(2)} g) to the deepest lean, the least grip in use was <b>${g.entry_blend_pct}%</b> of the outline.`);
+  left.innerHTML = `<h2>Grip circle, best lap ${esc(d.best)} <span class="note">(estimate from GPS)</span></h2>
+    <div class="legend"><span><span class="dot" style="background:var(--series-best)"></span>each moment of the best lap</span>
+    <span><span class="dot" style="background:var(--text-primary)"></span>${esc(c.name.replace(/\+/g, " + "))}</span>
+    <span><span class="sw" style="background:var(--text-secondary)"></span>the grip you reached through the day, each way</span></div>`;
+  const box = document.createElement("div");
+  box.className = "chart";
+  left.appendChild(box);
+  const cap = document.createElement("p");
+  cap.className = "gripcap";
+  cap.innerHTML = `${say} <span class="note">Near 100% = braking traded for lean all the way in; low = the brake let go before leaning in.</span>`;
+  left.appendChild(cap);
+  requestAnimationFrame(() => { if (box.isConnected) drawGG(box, d, c); });
+
+  // lean per turn
+  const order = d.sessions.map((x) => x.session);
+  const flagged = new Set((d.tire_flags || []).map((f) => short(f.turn)));
+  const inPick = new Set(turnsIn(c.name));
+  const rows = G.turns.map((t) => {
+    const all = order.map((sn) => t.sessions.find((x) => x.session === sn) || null);    // null: no lap of that session counted
+    const seq = all.filter(Boolean);
+    const change = seq.length > 1 ? seq[seq.length - 1].deg - seq[0].deg : null;
+    return `<tr class="${inPick.has(short(t.label)) ? "on" : ""}" data-c="${esc(t.corner)}">
+      <td class="lbl">${flagged.has(short(t.label)) ? '<span class="flag" title="Tire signal: mid-corner speed and grip fell every session">&#9888;</span> ' : ""}${esc(t.label)}<span class="sub">${t.side === "R" ? "R" : "L"}</span></td>
+      <td class="num big">${deg(t.best_deg)}</td>
+      <td class="num">${deg(t.max_deg)}<span class="sub">${esc(t.max_from.replace(" lap ", " L"))}</span></td>
+      <td class="seq">${all.map((x, i) => `<span title="Session ${d.sessions[i].number}${x ? `, ${x.laps} laps` : ": no lap within 3% of the best"}">${x ? x.deg.toFixed(1) : "&ndash;"}</span>`).join('<span class="arr">&rsaquo;</span>')}</td>
+      <td class="num">${change == null ? "" : `${signed(change, 1)}&deg;`}</td></tr>`;
+  }).join("");
+  const gy = G.gyro;
+  const cross = !gy ? "These logs have no gyro channels to cross-check the lean with."
+    : gy.r >= 0.5 ? `Cross-check: the logger's gyro follows the GPS lean rate, r = ${gy.r.toFixed(2)} (1 = the same shape).`
+      : `<span class="flag">&#9888; The logger's gyro does not follow the GPS lean rate today (r = ${gy.r.toFixed(2)}), so treat these angles with more caution.</span>`;
+  right.innerHTML = `<h2>Lean angle by turn <span class="note">(estimate; deepest lean held for ${G.hold_s} s within ${G.lean_win_m.toFixed(0)} m of the apex, ${G.laps} laps)</span></h2>
+    <table class="lean"><thead><tr><th>Turn</th><th class="num">Best lap</th><th class="num">Deepest today</th><th>By session, in order</th><th class="num">Change</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="note">Lean is the angle the GPS cornering force needs: bike and rider together, on a flat road. Hanging off, tire width, banking and crests are not in it, so the bike itself leans a few degrees more or less.
+    By session is the middle value of that session's laps within 3% of the best (&ndash; where it has none), and Change is first to last; a turn where it falls through the day belongs next to the tire signal (&#9888; marks turns the tire check flagged).
+    ${cross} The figure on each corner button is the share of that corner spent near the outline. Up and down keys change corner.</p>`;
+  right.querySelector("tbody").addEventListener("click", (ev) => {
+    const tr = ev.target.closest("tr[data-c]");
+    if (tr) { S.corner = tr.dataset.c; render(); }
+  });
+}
+
 // ---------------------------------------------------------------- 6. stint
 const fmtLapTenths = (sec) => { const mm = Math.floor(sec / 60); return `${mm}:${(sec - mm * 60).toFixed(1).padStart(4, "0")}`; };
 // a gap of under a second without its leading zero, to keep the lap-by-corner table narrow
@@ -837,12 +969,18 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "2") setView("map");
   else if (e.key === "3") setView("corners");
   else if (e.key === "4") setView("delta");
+  else if (e.key === "5") setView("grip");
   else if (e.key === "6") setView("stint");
   else if ((e.key === "x" || e.key === "X") && S.view === "stint") toggleStintX();
   else if (e.key === "f" || e.key === "F") toggleFs();
   else if (e.key === "ArrowLeft") $("#prev").click();
   else if (e.key === "ArrowRight") $("#next").click();
-  else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && S.view === "corners" && S.day) {
+  else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && S.view === "grip" && S.day) {
+    const cs = S.day.corners, i = cs.findIndex((c) => c.name === S.corner);     // riding order
+    S.corner = cs[Math.max(0, Math.min(cs.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))].name;
+    render();
+    e.preventDefault();
+  } else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && S.view === "corners" && S.day) {
     const sorted = [...S.day.corners].sort((a, b) => b.lost_s - a.lost_s);
     const i = sorted.findIndex((c) => c.name === S.corner);
     const j = Math.max(0, Math.min(sorted.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));

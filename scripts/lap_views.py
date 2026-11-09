@@ -92,3 +92,132 @@ def late_minus_early(section_times, n_third):
     if not n_third or len(rows) < 2 * n_third:
         return None
     return rows[-n_third:].mean(axis=0) - rows[:n_third].mean(axis=0)
+
+
+# ---------------------------------------------------------------- grip view (lean and the grip circle)
+
+LEAN_WIN_M = 70.0       # a turn's lean is read within this distance of its apex (as the tire check does)
+HOLD_S = 0.5            # ...and only counts if it was held this long, so a GPS spike cannot set it
+ENV_STEP_DEG = 15       # the grip outline has a point every this many degrees round the circle
+ENV_WIDTH_DEG = 45      # ...read from the samples within half this of that direction
+ENV_HOLD_S = 0.2        # ...where a lap's peak is the level it reached for this long
+ENV_LAP_PCT = 90        # ...and the outline is this percentile of the laps' peaks
+NEAR_LIMIT = 0.9        # "near the limit" = at least this share of the outline in that direction
+BRAKING_G = 0.30        # a corner has a brake zone when braking reaches this
+
+
+def despike(x, samples=5):
+    """Take out spikes shorter than about half the window (GPS glitches) and nothing else."""
+    from scipy.signal import medfilt
+    return medfilt(np.asarray(x, float), samples)
+
+
+def lean_deg(lat_g):
+    """Lean angle (degrees) that balances a cornering force of lat_g: atan(lateral g). This is the
+    lean of bike and rider together, measured from upright on a flat road. Hanging off, tire
+    width, banking and crests are not in it, so the bike's own lean differs by a few degrees."""
+    return np.degrees(np.arctan(np.abs(lat_g)))
+
+
+def held_peak(x, samples):
+    """The largest value of x that was held for at least `samples` samples in a row (nan when x is
+    shorter than that). A single high sample does not count; a level that is kept does."""
+    from scipy.ndimage import minimum_filter1d
+    x = np.asarray(x, float)
+    if len(x) < samples or samples < 1:
+        return float("nan")
+    held = minimum_filter1d(x, size=samples, mode="nearest", origin=0)
+    half = samples // 2
+    return float(np.max(held[half:len(x) - (samples - 1 - half)]))    # only windows that lie wholly inside x
+
+
+def envelope(laps, top_n, step_deg=ENV_STEP_DEG, width_deg=ENV_WIDTH_DEG, pct=ENV_LAP_PCT):
+    """Outline of the grip the rider reaches, by direction round the grip circle. laps: one
+    (lat, lon) pair of arrays per lap; lat = cornering g (right positive), lon = acceleration g
+    (braking negative). Returns the radius (g) every step_deg degrees, the first at 0 degrees
+    (pure right-hand cornering), going round through 90 (pure acceleration).
+
+    For each direction, each lap gives its own peak: the top_n-th largest of its samples within
+    width_deg / 2 of that direction, a level it reached for top_n samples. The outline is the
+    pct-th percentile of those peaks across the laps (always one lap's actual peak). So:
+      - one glitch cannot set it (a lap's single largest sample is not its peak, and one bad lap
+        is not the percentile);
+      - it does not creep outward as more laps are ridden, the way the largest sample of the
+        whole day would;
+      - seconds spent coasting in a direction do not pull it in, as a percentile of samples would.
+    The directions overlap because grip does not change sharply with direction while the samples
+    can be bunched: hard braking is rarely dead straight. A lap with fewer than 3 x top_n samples
+    in a direction has no peak there; a direction no lap has a peak in takes its value from its
+    neighbours; nan everywhere if there is none at all."""
+    n = int(round(360 / step_deg))
+    top_n = max(1, int(top_n))
+    peaks = np.full((len(laps), n), np.nan)
+    for i, (lat, lon) in enumerate(laps):
+        lat, lon = np.asarray(lat, float), np.asarray(lon, float)
+        ang = np.degrees(np.arctan2(lon, lat))
+        r = np.hypot(lat, lon)
+        for k in range(n):
+            mine = r[np.abs((ang - k * step_deg + 180.0) % 360.0 - 180.0) <= width_deg / 2.0]
+            if len(mine) >= 3 * top_n:
+                peaks[i, k] = np.partition(mine, len(mine) - top_n)[len(mine) - top_n]
+    out = np.full(n, np.nan)
+    for k in range(n):
+        col = peaks[:, k][~np.isnan(peaks[:, k])] if len(laps) else []
+        if len(col):
+            out[k] = np.percentile(col, pct, method="lower")
+    ok = ~np.isnan(out)
+    if not ok.any():
+        return out
+    idx = np.arange(n)
+    return np.interp(idx, np.r_[idx[ok] - n, idx[ok], idx[ok] + n], np.r_[out[ok], out[ok], out[ok]])
+
+
+def limit_share(lat, lon, env, step_deg=ENV_STEP_DEG):
+    """How much of the outline each sample uses: its grip (g) over the outline in its direction."""
+    lat, lon = np.asarray(lat, float), np.asarray(lon, float)
+    n = len(env)
+    pos = (np.degrees(np.arctan2(lon, lat)) / step_deg) % n
+    lo = np.floor(pos).astype(int) % n
+    frac = pos - np.floor(pos)
+    edge = env[lo] * (1 - frac) + env[(lo + 1) % n] * frac
+    return np.hypot(lat, lon) / edge
+
+
+def corner_grip(lat, lon, env, dt):
+    """Grip use through one corner on one lap, from its samples in riding order.
+    near_limit_pct : share of the corner's time spent at NEAR_LIMIT of the outline or more.
+    entry_blend_pct: from the hardest braking to the deepest lean, the lowest share of the outline
+                     used. Near 100 = braking was traded for lean all the way in (trail braking);
+                     low = the brake was let go before the bike was leaned in. None when the
+                     corner has no brake zone before its deepest lean."""
+    lat, lon = np.asarray(lat, float), np.asarray(lon, float)
+    if len(lat) < 5:
+        return None
+    share = limit_share(lat, lon, env)
+    apex = int(np.argmax(np.abs(lat)))
+    out = {"near_limit_pct": float(100 * np.mean(share >= NEAR_LIMIT)), "entry_blend_pct": None,
+           "peak_lat_g": float(np.abs(lat[apex])), "peak_brake_g": float(max(0.0, -lon[:apex + 1].min()))}
+    if out["peak_brake_g"] >= BRAKING_G:
+        brake = int(np.argmin(lon[:apex + 1]))
+        if apex > brake:
+            out["entry_blend_pct"] = float(100 * min(1.0, share[brake:apex + 1].min()))
+    return out
+
+
+def gyro_agreement(lean_rate, roll, yaw, pitch):
+    """Cross-check of the GPS lean against the logger's gyro. The logger sits tilted on the bike, so
+    the bike's roll shows up in a mix of its three gyro axes; the mix is fitted, and the result is
+    how well the fitted gyro roll rate follows the GPS lean rate: the correlation r, 1 = the same
+    shape. Returns {"r", "n"}, or None when there is too little data."""
+    y = np.asarray(lean_rate, float)
+    A = np.c_[np.asarray(roll, float), np.asarray(yaw, float), np.asarray(pitch, float), np.ones(len(y))]
+    ok = np.isfinite(y) & np.all(np.isfinite(A), axis=1)
+    if ok.sum() < 500:
+        return None
+    y, A = y[ok], A[ok]
+    coef, *_ = np.linalg.lstsq(A, y, rcond=None)
+    ss = float(np.sum((y - y.mean()) ** 2))
+    if ss <= 0:
+        return None
+    r2 = 1.0 - float(np.sum((y - A @ coef) ** 2)) / ss
+    return {"r": float(np.sqrt(max(0.0, r2))), "n": int(ok.sum())}

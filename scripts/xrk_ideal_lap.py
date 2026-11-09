@@ -57,6 +57,22 @@ Outputs (OUT_DIR): sections.csv, lap_sections.csv, corners.csv, corner_phases.cs
                    section times can be trusted, the mean of the last third minus the mean of the
                    first third in every section (the lap table's fade, split by section), with
                    totals for the brake-in parts, the drive-out parts and the unsplit corners.
+    grip         : for the viewer, over the laps used for the ideal. Cornering g is GPS lateral g with
+                   spikes taken out, then smoothed; acceleration g is the change in GPS speed.
+                   lean: atan(cornering g) in degrees, the lean of bike and rider together on a
+                   flat road. Per turn, the deepest lean held for HOLD_S within LEAN_WIN_M of the
+                   apex: on the best lap, the most on any used lap, and the median per session.
+                   grip circle: the best lap's samples (cornering g against acceleration g) and
+                   the outline of the grip reached through the day by direction: each lap's peak
+                   in a direction is the level it held for ENV_HOLD_S there, and the outline is
+                   the ENV_LAP_PCT percentile of the laps' peaks, so a glitch or one odd lap does
+                   not set it and it does not grow just because more laps were ridden. Per corner on
+                   the best lap: the share of its time within NEAR_LIMIT of the outline, and the
+                   lowest share of the outline used between the hardest braking and the deepest
+                   lean (high = braking was traded for lean, low = the brake was released first).
+                   gyro: how well the logger's gyro follows the GPS lean rate (r), a cross-check.
+                   All of it is an estimate from GPS: hanging off, tire width, banking and
+                   crests are not in it.
 """
 import argparse
 import contextlib
@@ -107,7 +123,12 @@ def load(path):
     glat = np.array(ch["GPS_LateralAcc"].column(1).to_pylist(), float)
     name = os.path.splitext(os.path.basename(path))[0]
     name = name[name.rfind("a_"):] if "a_" in name else name
-    return {"name": name, "t": t, "v": v, "lat": lat, "lon": lon, "glat": glat,
+    try:        # the logger's own gyro, on the GPS clock (a cross-check for the lean estimate)
+        gyro = {k: np.interp(t, np.array(ch[k].column(0).to_pylist(), float) / 1000.0,
+                             np.array(ch[k].column(1).to_pylist(), float)) for k in ("RollRate", "YawRate", "PitchRate")}
+    except (KeyError, IndexError, ValueError):
+        gyro = None
+    return {"name": name, "t": t, "v": v, "lat": lat, "lon": lon, "glat": glat, "gyro": gyro,
             "laps": log.laps.to_pylist(), "vehicle": log.metadata.get("Vehicle"),
             "date": log.metadata.get("Log Date"), "venue": log.metadata.get("Venue") or ""}
 
@@ -205,6 +226,7 @@ def main():
         s["ax"] = np.gradient(vs, s["t"]) / G
         s["ax"] = smooth(s["ax"], dt, 0.4)
         s["gl"] = smooth(s["glat"], dt, 0.8)
+        s["gld"] = smooth(lap_views.despike(s["glat"]), dt, 0.8)    # for lean and the grip circle
 
     # candidate laps
     laps = []
@@ -671,6 +693,93 @@ def main():
                 "out_s": round(float(sum(x for x, sec in zip(diff, sections) if sec["part"] == "out")), 3),
                 "whole_s": round(float(sum(x for x, sec in zip(diff, sections) if sec["part"] == "whole")), 3)}})
 
+    # grip view: lean per turn and the grip circle, from the despiked cornering g and the speed-derived
+    # acceleration g, over the laps used for the ideal
+    def in_lap(L):
+        return (L["t"] >= L["lap"]["start_time"] / 1000) & (L["t"] <= L["lap"]["end_time"] / 1000)
+
+    def runs(mask):
+        """Index ranges of consecutive True samples."""
+        i = np.flatnonzero(mask)
+        return np.split(i, np.flatnonzero(np.diff(i) > 1) + 1) if len(i) else []
+
+    apex_ds = sorted(float(rd[p]) for p in pk)
+
+    def turn_lean(L, a):
+        """Deepest lean (degrees) held within LEAN_WIN_M of the apex at distance a, and nearer to it
+        than to any other apex (so two turns close together each read their own lean), or nan."""
+        hold = max(2, int(round(lap_views.HOLD_S / L["s"]["dt"])))
+        gap = lambda d: np.abs((d - a + L_ref / 2) % L_ref - L_ref / 2)
+        others = [gap(L["prog"] - (o - a)) for o in apex_ds if o != a]
+        near = in_lap(L) & (gap(L["prog"]) < lap_views.LEAN_WIN_M)
+        for o in others:
+            near &= gap(L["prog"]) <= o
+        g = np.abs(L["s"]["gld"][L["idx"]])
+        peaks = [lap_views.held_peak(g[r], hold) for r in runs(near)]
+        peaks = [p for p in peaks if p == p]
+        return float(lap_views.lean_deg(max(peaks))) if peaks else float("nan")
+
+    lat_of = lambda L: L["s"]["gld"][L["idx"]]
+    lon_of = lambda L: L["s"]["ax"][L["idx"]]
+    env = lap_views.envelope([(lat_of(L)[in_lap(L)], lon_of(L)[in_lap(L)]) for L in used],
+                             top_n=round(lap_views.ENV_HOLD_S / rs["dt"]))
+    grip = None
+    if not np.isnan(env).any():
+        turns_out = []
+        for ci in order:
+            a_d = float(rd[pk[ci]])
+            per = [(turn_lean(L, a_d), L) for L in used]
+            per = [(v, L) for v, L in per if v == v]
+            if not per:
+                continue
+            top = max(per, key=lambda x: x[0])
+            mine = turn_lean(fast, a_d)
+            by_session = []
+            for s_ in sessions:
+                vs = [v for v, L in per if L["s"] is s_]
+                if vs:
+                    by_session.append({"session": s_["name"], "deg": round(float(np.median(vs)), 1), "laps": len(vs)})
+            turns_out.append({"label": tname[ci], "side": apex_side[ci], "d": round(a_d, 1),
+                              "corner": next(c["name"] for c in corners if ci in c["corners"]),
+                              "best_deg": round(mine, 1) if mine == mine else None, "max_deg": round(top[0], 1),
+                              "max_from": f"{top[1]['s']['name']} lap {top[1]['num']}", "sessions": by_session})
+        m_fast = in_lap(fast)
+        f_lat, f_lon, f_d = lat_of(fast), lon_of(fast), np.clip(fast["prog"], 0.0, L_ref)
+        corners_out = []
+        for c in corners:
+            m = m_fast & in_sec(f_d, c, L_ref)
+            if m.sum() < 5:
+                continue
+            apex_i = np.flatnonzero(m)[int(np.argmax(np.abs(f_lat[m])))]
+            run = next(r for r in runs(m) if r[0] <= apex_i <= r[-1])      # the stretch of the lap that holds the apex
+            g = lap_views.corner_grip(f_lat[run], f_lon[run], env, fast["s"]["dt"])
+            if g is None:
+                continue
+            share = lap_views.limit_share(f_lat[m], f_lon[m], env)
+            corners_out.append({"name": c["name"], "near_limit_pct": round(float(100 * np.mean(share >= lap_views.NEAR_LIMIT))),
+                                "entry_blend_pct": None if g["entry_blend_pct"] is None else round(g["entry_blend_pct"]),
+                                "peak_lat_g": round(g["peak_lat_g"], 2), "peak_brake_g": round(g["peak_brake_g"], 2)})
+        gyro = None
+        if all(L["s"]["gyro"] for L in used):
+            rate, rolls = [], {"RollRate": [], "YawRate": [], "PitchRate": []}
+            for L in used:
+                s_, m = L["s"], in_lap(L)
+                lean_signed = np.degrees(np.arctan(s_["gld"][L["idx"]]))
+                rate.append(np.gradient(lean_signed, L["t"])[m])
+                for k in rolls:
+                    rolls[k].append(smooth(s_["gyro"][k][L["idx"]], s_["dt"], 0.8)[m])
+            gyro = lap_views.gyro_agreement(np.concatenate(rate), *(np.concatenate(rolls[k]) for k in rolls))
+            if gyro:
+                gyro["r"] = round(gyro["r"], 2)
+        thin = slice(None, None, 2)
+        c100 = lambda arr: [int(round(float(x) * 100)) for x in arr]
+        grip = {"lean_win_m": lap_views.LEAN_WIN_M, "hold_s": lap_views.HOLD_S, "near_limit": lap_views.NEAR_LIMIT,
+                "laps": len(used), "turns": turns_out, "corners": corners_out, "gyro": gyro,
+                "envelope": {"step_deg": lap_views.ENV_STEP_DEG, "width_deg": lap_views.ENV_WIDTH_DEG,
+                             "hold_s": lap_views.ENV_HOLD_S, "lap_pct": lap_views.ENV_LAP_PCT, "g100": c100(env)},
+                "gg": {"d": [round(float(x), 1) for x in f_d[m_fast][thin]], "lat100": c100(f_lat[m_fast][thin]),
+                       "lon100": c100(f_lon[m_fast][thin])}}
+
     # viewer.json: the same map and trace numbers as the PNGs, for the pit lap viewer (viewer/)
     import json
     step = max(1, len(rd) // 600)
@@ -699,7 +808,7 @@ def main():
         "apexes": [{"label": tname[ci], "d": round(float(rd[p]), 1), "x": round(float(rx[p]), 1),
                     "y": round(float(ry[p]), 1), "side": apex_side[ci]} for ci, p in enumerate(pk)],
         "trace": {"d": r3(grid_d[::2]), "best_kph": r3(best_v[::2]), "ideal_kph": r3(comp_v[::2])},
-        "delta": delta, "stint": {"min_trend_laps": lap_views.MIN_TREND_LAPS, "sessions": stint},
+        "delta": delta, "stint": {"min_trend_laps": lap_views.MIN_TREND_LAPS, "sessions": stint}, "grip": grip,
     }, open(os.path.join(a.out, "viewer.json"), "w"), separators=(",", ":"))
 
     print("\n".join(lines))
