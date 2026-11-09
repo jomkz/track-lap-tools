@@ -1,7 +1,7 @@
 "use strict";
 // Pit lap viewer front end. Plain JS and SVG, no internet, no libraries.
 
-const S = { days: [], idx: 0, day: null, view: "board", corner: null, version: -1, unit: "kmh" };
+const S = { days: [], idx: 0, day: null, view: "board", corner: null, lap: null, version: -1, unit: "kmh" };
 const $ = (s, el = document) => el.querySelector(s);
 const NS = "http://www.w3.org/2000/svg";
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -116,6 +116,7 @@ function render() {
   main.innerHTML = "";
   if (S.view === "map") renderMap(main, d);
   else if (S.view === "corners") renderCorners(main, d);
+  else if (S.view === "delta") renderDelta(main, d);
   else renderBoard(main, d);
 }
 
@@ -307,29 +308,44 @@ function lineChart(host, opts) {
   requestAnimationFrame(() => { if (parent.isConnected) drawChart(parent, opts); });   // the view may have changed already
 }
 
-function drawChart(parent, { x0, x1, series, marks = [], shade = null, apexes = [], hover = true, small = false }) {
+// a round tick step that leaves at most maxTicks gridlines over the range
+function niceStep(range, maxTicks) {
+  for (const st of [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500]) if (range / st <= maxTicks) return st;
+  return 1000;
+}
+
+// Line chart against distance. Defaults suit speed; pass yFmt/tipFmt/minRange for other units.
+//   zero: true      keep 0 in view (the caller draws the zero series)
+//   series[].end    text to print at the line's right-hand end
+//   series[].dash   SVG dash pattern
+function drawChart(parent, { x0, x1, series, marks = [], shade = null, apexes = [], hover = true, small = false,
+  minRange = 10, zero = false, yFmt = (y) => String(Math.round(y)), tipFmt = (v) => `<b>${v.toFixed(1)}</b> ${unit()}` }) {
   const W = Math.max(300, parent.clientWidth), H = Math.max(60, parent.clientHeight);
   const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
   const fs = rem * (small ? 0.7 : 0.8);
-  const m = { l: fs * 3.2, r: fs * 0.8, t: fs * 0.6, b: fs * (small ? 2.6 : 2.4) };
+  const ends = series.some((sr) => sr.end);
+  const m = { l: fs * 3.4, r: fs * (ends ? 4.4 : 0.8), t: fs * 0.6, b: fs * (small ? 2.6 : 2.4) };
+  if (H - m.t - m.b < 10) return null;    // no room to draw (the panel is still collapsing)
   const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img" }, parent);
   const all = [];
-  series.forEach((s) => s.pts.forEach(([x, y]) => { if (x >= x0 && x <= x1) all.push(y); }));
-  let y0 = Math.min(...all), y1 = Math.max(...all);
-  const yr = Math.max(10, y1 - y0);
-  const stepY = yr > 80 ? 20 : yr > 40 ? 10 : 5;
-  y0 = Math.floor((y0 - yr * 0.08) / stepY) * stepY;
-  y1 = Math.ceil((y1 + yr * 0.05) / stepY) * stepY;
+  series.forEach((sr) => sr.pts.forEach(([x, y]) => { if (x >= x0 && x <= x1) all.push(y); }));
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (zero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+  if (hi - lo < minRange) { const mid = (hi + lo) / 2; lo = mid - minRange / 2; hi = mid + minRange / 2; }
+  // the lines fill the plot whatever its height; gridlines sit on round values inside that range
+  const yr = hi - lo, y0 = lo - yr * 0.08, y1 = hi + yr * 0.06;
+  const stepY = niceStep(y1 - y0, Math.max(2, Math.floor((H - m.t - m.b) / (fs * 1.7))));
   const X = (x) => m.l + ((x - x0) / (x1 - x0)) * (W - m.l - m.r);
   const Y = (y) => H - m.b - ((y - y0) / (y1 - y0)) * (H - m.t - m.b);
   for (const [a, b] of shade || []) {
     const xa = X(Math.max(a, x0)), xb = X(Math.min(b, x1));
     if (xb > xa) el("rect", { x: xa, y: m.t, width: xb - xa, height: H - m.t - m.b, fill: "var(--surface-2)" }, svg);
   }
-  for (let y = y0; y <= y1; y += stepY) {
+  for (let i = Math.ceil(y0 / stepY - 1e-9); i * stepY <= y1 + 1e-9; i++) {
+    const y = i * stepY;
     el("line", { x1: m.l, x2: W - m.r, y1: Y(y), y2: Y(y), stroke: "var(--grid)", "stroke-width": 1 }, svg);
     const t = el("text", { x: m.l - 8, y: Y(y), "text-anchor": "end", "dominant-baseline": "middle", "font-size": fs * 0.85, class: "muted" }, svg);
-    t.textContent = y;
+    t.textContent = yFmt(Math.abs(y) < stepY / 1000 ? 0 : y, stepY);
   }
   for (const a of apexes) {
     if (a.d < x0 || a.d > x1) continue;
@@ -342,17 +358,29 @@ function drawChart(parent, { x0, x1, series, marks = [], shade = null, apexes = 
     const mt = el("text", { x: X(mk.x) + (mk.left ? -6 : 6), y: m.t + fs * 0.9 + (mk.row || 0) * fs * 1.05, "text-anchor": mk.left ? "end" : "start", "font-size": fs * 0.85, class: "sec" }, svg);
     mt.textContent = mk.label;
   }
-  for (const s of series) {
-    const pts = s.pts.filter(([x]) => x >= x0 && x <= x1);
-    el("polyline", { points: pts.map(([x, y]) => `${X(x).toFixed(1)},${Y(y).toFixed(1)}`).join(" "), fill: "none",
-      stroke: s.color, "stroke-width": s.width || Math.max(2, rem * 0.13), "stroke-linejoin": "round" }, svg);
-    const near = s.minRange ? pts.filter(([x]) => x >= s.minRange[0] && x <= s.minRange[1]) : pts;
-    if (s.minDot && near.length) {
+  const endLabels = [];
+  for (const sr of series) {
+    const pts = sr.pts.filter(([x]) => x >= x0 && x <= x1);
+    const attrs = { points: pts.map(([x, y]) => `${X(x).toFixed(1)},${Y(y).toFixed(1)}`).join(" "), fill: "none",
+      stroke: sr.color, "stroke-width": sr.width || Math.max(2, rem * 0.13), "stroke-linejoin": "round" };
+    if (sr.dash) attrs["stroke-dasharray"] = sr.dash;
+    el("polyline", attrs, svg);
+    if (sr.end && pts.length) endLabels.push({ y: Y(pts[pts.length - 1][1]), text: sr.end, color: sr.color });
+    const near = sr.minRange ? pts.filter(([x]) => x >= sr.minRange[0] && x <= sr.minRange[1]) : pts;
+    if (sr.minDot && near.length) {
       const mn = near.reduce((a, b) => (b[1] < a[1] ? b : a));
-      el("circle", { cx: X(mn[0]), cy: Y(mn[1]), r: Math.max(4, rem * 0.3), fill: s.color, stroke: "var(--surface-1)", "stroke-width": 2 }, svg);
-      const lt = el("text", { x: X(mn[0]) + (s.minBelow ? -1 : 1) * fs * 0.6, y: Y(mn[1]) + fs * (s.minBelow ? 1.4 : -0.9), "text-anchor": s.minBelow ? "end" : "start", "font-size": fs, "font-weight": 700 }, svg);
+      el("circle", { cx: X(mn[0]), cy: Y(mn[1]), r: Math.max(4, rem * 0.3), fill: sr.color, stroke: "var(--surface-1)", "stroke-width": 2 }, svg);
+      const lt = el("text", { x: X(mn[0]) + (sr.minBelow ? -1 : 1) * fs * 0.6, y: Y(mn[1]) + fs * (sr.minBelow ? 1.4 : -0.9), "text-anchor": sr.minBelow ? "end" : "start", "font-size": fs, "font-weight": 700 }, svg);
       lt.textContent = mn[1].toFixed(0);
     }
+  }
+  // end labels: a dot in the series colour and the value in text ink, nudged apart where lines end close together
+  endLabels.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < endLabels.length; i++) endLabels[i].ty = Math.max(endLabels[i].y, (endLabels[i - 1].ty ?? endLabels[i - 1].y) + fs * 1.05);
+  for (const e of endLabels) {
+    el("circle", { cx: W - m.r, cy: e.y, r: Math.max(3, rem * 0.18), fill: e.color, stroke: "var(--surface-1)", "stroke-width": 2 }, svg);
+    const t = el("text", { x: W - m.r + fs * 0.5, y: e.ty ?? e.y, "dominant-baseline": "middle", "font-size": fs * 0.9, "font-weight": 650 }, svg);
+    t.textContent = e.text;
   }
   if (hover) {
     const cross = el("line", { y1: m.t, y2: H - m.b, stroke: "var(--text-muted)", "stroke-width": 1, visibility: "hidden" }, svg);
@@ -362,10 +390,10 @@ function drawChart(parent, { x0, x1, series, marks = [], shade = null, apexes = 
       const px = ((ev.clientX - r.left) / r.width) * W;
       const x = x0 + ((px - m.l) / (W - m.l - m.r)) * (x1 - x0);
       cross.setAttribute("x1", px); cross.setAttribute("x2", px); cross.setAttribute("visibility", "visible");
-      const vals = series.map((s) => {
-        let best = s.pts[0], bd = Infinity;
-        for (const p of s.pts) { const dd = Math.abs(p[0] - x); if (dd < bd) { bd = dd; best = p; } }
-        return `<span style="color:${s.color}">&#9644;</span> ${esc(s.name)}: <b>${best[1].toFixed(1)}</b> ${unit()}`;
+      const vals = series.map((sr) => {
+        let best = sr.pts[0], bd = Infinity;
+        for (const p of sr.pts) { const dd = Math.abs(p[0] - x); if (dd < bd) { bd = dd; best = p; } }
+        return `<span style="color:${sr.color}">&#9644;</span> ${esc(sr.name)}: ${tipFmt(best[1], sr)}`;
       });
       showTip(`${x.toFixed(0)} m<br>${vals.join("<br>")}`, ev);
     });
@@ -481,6 +509,150 @@ function renderCorners(main, d) {
   right.appendChild(tb);
 }
 
+// ---------------------------------------------------------------- 4. time delta
+// one fixed colour per session number, the same in every view
+const sessionColor = (n) => (n >= 1 && n <= 6 ? `var(--session-${n})` : "var(--text-muted)");
+const signed = (v, dp = 2) => (v > 0 ? "+" : v < 0 ? "&minus;" : "") + Math.abs(v).toFixed(dp);
+const lapKey = (l) => `${l.session}:${l.lap}`;
+
+// laps that can be picked on the delta view, in session then lap order (the best lap is the zero line)
+function deltaLaps(d) {
+  const D = d.delta;
+  if (!D) return [];
+  const order = new Map(d.sessions.map((x, i) => [x.session, i]));
+  return [...D.laps].sort((a, b) => (order.get(a.session) ?? 99) - (order.get(b.session) ?? 99) || a.lap - b.lap);
+}
+const isRef = (d, l) => l.session === d.best_lap.session && l.lap === d.best_lap.lap;
+
+// time through each corner (its brake-in and drive-out parts together) for one lap's section times
+function cornerTimes(d, sec) {
+  return d.corners.map((c) => d.sections.reduce((t, x, k) => (x.corner === c.name ? t + sec[k] : t), 0));
+}
+
+// upright bars either side of zero: up = time lost, down = time gained
+function drawBars(parent, items, color) {
+  const W = Math.max(300, parent.clientWidth), H = Math.max(60, parent.clientHeight);
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+  const fs = rem * 0.72;
+  const m = { l: fs * 3.4, r: fs * 0.8, t: fs * 1.5, b: fs * 1.7 };
+  if (H - m.t - m.b < 10) return;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "Time lost or gained in each corner" }, parent);
+  const top = Math.max(0.05, ...items.map((i) => i.v)), bot = Math.min(0, ...items.map((i) => i.v));
+  const Y = (v) => m.t + ((top - v) / (top - bot)) * (H - m.t - m.b - (bot < 0 ? fs * 1.3 : 0));
+  const band = (W - m.l - m.r) / items.length, bw = Math.min(band * 0.55, rem * 1.1), r = Math.min(4, bw / 2);
+  el("line", { x1: m.l, x2: W - m.r, y1: Y(0), y2: Y(0), stroke: "var(--line)", "stroke-width": 1 }, svg);
+  const zt = el("text", { x: m.l - 8, y: Y(0), "text-anchor": "end", "dominant-baseline": "middle", "font-size": fs * 0.85, class: "muted" }, svg);
+  zt.textContent = "0";
+  items.forEach((it, i) => {
+    const cx = m.l + band * (i + 0.5), x = cx - bw / 2, ya = Y(0), yb = Y(it.v), up = it.v >= 0;
+    if (Math.abs(yb - ya) >= 1) {
+      const rr = Math.min(r, Math.abs(yb - ya)), k = up ? 1 : -1;     // rounded at the data end, square on the zero line
+      el("path", { d: `M${x},${ya} L${x},${yb + k * rr} Q${x},${yb} ${x + rr},${yb} L${x + bw - rr},${yb} Q${x + bw},${yb} ${x + bw},${yb + k * rr} L${x + bw},${ya} Z`, fill: color }, svg);
+    }
+    const vt = el("text", { x: cx, y: up ? yb - fs * 0.45 : yb + fs * 1.05, "text-anchor": "middle", "font-size": fs * 0.85, "font-weight": 650 }, svg);
+    vt.innerHTML = signed(it.v);
+    const lt = el("text", { x: cx, y: H - fs * 0.45, "text-anchor": "middle", "font-size": fs * 0.85, class: "sec" }, svg);
+    lt.textContent = it.label;
+    const hit = el("rect", { x: cx - band / 2, y: m.t - fs, width: band, height: H - m.t, fill: "transparent" }, svg);
+    hit.addEventListener("pointermove", (ev) => showTip(`<b>${esc(it.name)}</b><br>${it.v >= 0 ? "Lost" : "Gained"} <b>${Math.abs(it.v).toFixed(2)} s</b> ${esc(it.against)}`, ev));
+    hit.addEventListener("pointerleave", hideTip);
+  });
+}
+
+function renderDelta(main, d) {
+  const D = d.delta;
+  if (!D || !D.laps.length) {
+    main.innerHTML = `<div class="empty"><p>No delta trace for this day yet.</p>
+      <p class="note">It was analysed before this view existed. It is analysed again on its own; the status at the top right says when.</p></div>`;
+    return;
+  }
+  const laps = deltaLaps(d);
+  const pick = laps.find((l) => lapKey(l) === S.lap && !isRef(d, l)) || null;
+  const num = new Map(d.sessions.map((x) => [x.session, x.number]));
+  const pts = (cs) => D.d.map((x, i) => [x, cs[i] / 100]);
+  const L = d.lap_length_m;
+  const series = [{ name: "Best lap", color: "var(--series-best)", pts: [[0, 0], [L, 0]], width: 2 },
+    { name: "Ideal", color: "var(--series-ideal)", pts: pts(D.ideal_cs), end: signed(D.ideal_cs[D.ideal_cs.length - 1] / 100).replace("&minus;", "−") }];
+  const legend = [`<span><span class="sw" style="background:var(--series-best)"></span>Best lap ${esc(d.best)} (zero line)</span>`,
+    `<span><span class="sw" style="background:var(--series-ideal)"></span>Ideal ${esc(d.ideal)}</span>`];
+  for (const l of laps.filter((x) => x.session_best && !isRef(d, x))) {
+    const n = num.get(l.session);
+    if (pick && lapKey(pick) === lapKey(l)) continue;      // drawn as the picked lap instead
+    series.push({ name: `Session ${n} best`, color: sessionColor(n), pts: pts(l.cs) });
+    legend.push(`<span><span class="sw" style="background:${sessionColor(n)}"></span>Session ${n} best ${fmtLap(l.time_s)}</span>`);
+  }
+  if (pick) {
+    const gap = pick.time_s - d.best_lap.time_s;
+    series.push({ name: `${pick.session} lap ${pick.lap}`, color: "var(--text-primary)", pts: pts(pick.cs), width: 3,
+      end: signed(pick.cs[pick.cs.length - 1] / 100).replace("&minus;", "−") });
+    legend.push(`<span><span class="sw" style="background:var(--text-primary)"></span><b>${esc(pick.session)} lap ${pick.lap}</b> ${fmtLap(pick.time_s)} (${signed(gap)} s)</span>`);
+  }
+
+  const wrap = document.createElement("div");
+  wrap.className = "split";
+  main.appendChild(wrap);
+  const left = document.createElement("div");
+  left.className = "panel col";
+  const right = document.createElement("div");
+  right.className = "panel laps";
+  wrap.append(left, right);
+
+  left.innerHTML = `<h2>Seconds behind the best lap, around the lap
+      <span class="note">(${esc(d.best_lap.session)} lap ${d.best_lap.lap}; a line that climbs is losing time there, one that falls is gaining)</span></h2>
+    <div class="legend">${legend.join("")}</div>`;
+  const apexes = d.apexes.map((a) => ({ ...a }));
+  lineChart(left, { x0: 0, x1: L, apexes, series, zero: true, minRange: 0.2,
+    yFmt: (y, st) => (y > 0 ? "+" : y < 0 ? "−" : "") + Math.abs(y).toFixed(st < 0.1 ? 2 : 1),
+    tipFmt: (v) => `<b>${signed(v)} s</b>` });
+
+  // by corner: the picked lap, or the ideal when none is picked
+  const bestLap = d.laps.find((r) => r.session === d.best_lap.session && r.lap === d.best_lap.lap);
+  const pickRow = pick && d.laps.find((r) => r.session === pick.session && r.lap === pick.lap);
+  let items = null, title = "", color = "var(--series-ideal)";
+  if (pick && pickRow && pickRow.sec_s && bestLap && bestLap.sec_s) {
+    const a = cornerTimes(d, pickRow.sec_s), b = cornerTimes(d, bestLap.sec_s);
+    items = d.corners.map((c, i) => ({ label: turnsIn(c.name).join("+") || c.name, name: c.name.replace(/\+/g, " + "), v: a[i] - b[i], against: "to the best lap" }));
+    title = `By corner: ${esc(pick.session)} lap ${pick.lap} against the best lap`;
+    color = "var(--text-secondary)";
+  } else {
+    items = d.corners.map((c) => ({ label: turnsIn(c.name).join("+") || c.name, name: c.name.replace(/\+/g, " + "), v: -c.lost_s, against: "by the ideal lap on the best lap" }));
+    title = "By corner: the ideal lap against the best lap";
+  }
+  const bh = document.createElement("h2");
+  bh.className = "sub";
+  bh.innerHTML = `${title} <span class="note">(seconds; up = lost, down = gained)</span>`;
+  left.appendChild(bh);
+  const bars = document.createElement("div");
+  bars.className = "chart bars";
+  left.appendChild(bars);
+  requestAnimationFrame(() => { if (bars.isConnected) drawBars(bars, items, color); });
+
+  // lap picker
+  const groups = d.sessions.map((sx) => {
+    const mine = laps.filter((l) => l.session === sx.session);
+    if (!mine.length) return "";
+    const chips = mine.map((l) => {
+      const ref = isRef(d, l), gap = l.time_s - d.best_lap.time_s;
+      return `<button data-lap="${esc(lapKey(l))}" aria-pressed="${!!pick && lapKey(pick) === lapKey(l)}" class="${ref ? "ref" : ""}${l.used ? "" : " slow"}"
+        ${ref ? "disabled" : ""} title="${ref ? "The best lap: the zero line" : `${signed(gap)} s to the best lap${l.used ? "" : "; more than 3% off, so not in the ideal"}`.replace("&minus;", "-")}">
+        <span class="n">L${l.lap}</span><span>${fmtLap(l.time_s)}</span>${ref ? '<span class="tag">best</span>' : l.session_best ? '<span class="tag">session best</span>' : ""}</button>`;
+    }).join("");
+    return `<div class="lapgroup"><div class="lg-h"><span class="sw" style="background:${sessionColor(sx.number)}"></span>Session ${sx.number}<span class="note">${esc(sx.session)}, out ${esc((sx.start || "").slice(0, 5))}</span></div>
+      <div class="lapchips">${chips}</div></div>`;
+  }).join("");
+  right.innerHTML = `<h2>Pick a lap to compare</h2>${groups}
+    <p class="note">Up and down keys step through the laps; pick the same lap again to clear it. The ideal line falls where the best lap left time.
+    Every lap in this direction that the GPS recorded fully is here. Greyed times are more than 3% off the best, so they are not part of the ideal.</p>`;
+  right.addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-lap]");
+    if (!b || b.disabled) return;
+    S.lap = S.lap === b.dataset.lap ? null : b.dataset.lap;
+    render();
+  });
+  const on = right.querySelector('button[aria-pressed="true"]');
+  if (on) on.scrollIntoView({ block: "nearest" });
+}
+
 // ---------------------------------------------------------------- input
 document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => setView(t.dataset.view)));
 function setView(v) {
@@ -500,6 +672,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "1") setView("board");
   else if (e.key === "2") setView("map");
   else if (e.key === "3") setView("corners");
+  else if (e.key === "4") setView("delta");
   else if (e.key === "f" || e.key === "F") toggleFs();
   else if (e.key === "ArrowLeft") $("#prev").click();
   else if (e.key === "ArrowRight") $("#next").click();
@@ -508,6 +681,14 @@ document.addEventListener("keydown", (e) => {
     const i = sorted.findIndex((c) => c.name === S.corner);
     const j = Math.max(0, Math.min(sorted.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));
     S.corner = sorted[j].name;
+    render();
+    e.preventDefault();
+  } else if ((e.key === "ArrowDown" || e.key === "ArrowUp") && S.view === "delta" && S.day) {
+    const laps = deltaLaps(S.day).filter((l) => !isRef(S.day, l));
+    if (!laps.length) return;
+    const i = laps.findIndex((l) => lapKey(l) === S.lap);
+    const j = i < 0 ? (e.key === "ArrowDown" ? 0 : laps.length - 1) : Math.max(0, Math.min(laps.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)));
+    S.lap = lapKey(laps[j]);
     render();
     e.preventDefault();
   }
