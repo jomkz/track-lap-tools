@@ -21,6 +21,10 @@ wheel, so no compiler is needed. After that it starts in seconds with no interne
 Options: `--folder PATH` (watch another folder), `--port N`, `--no-browser`, `--once`
 (analyse the folder, write summaries, exit).
 
+If another program already uses the port, the viewer takes the next free one, opens the browser
+there, and says which port it took and how to keep it. If a lap viewer is already running on the
+port, a second start only opens the browser on the one that is running.
+
 ## Where files go
 
 | Folder | What | Setting in `config.json` |
